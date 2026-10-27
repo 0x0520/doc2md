@@ -29,7 +29,8 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	parts := map[string][]byte{}
 	for _, f := range zr.File {
 		switch f.Name {
-		case "word/document.xml", "word/styles.xml", "word/numbering.xml", "word/_rels/document.xml.rels":
+		case "word/document.xml", "word/styles.xml", "word/numbering.xml", "word/_rels/document.xml.rels",
+			"word/footnotes.xml", "word/endnotes.xml":
 			b, rerr := zipx.ReadEntry(f)
 			if rerr == nil {
 				parts[f.Name] = b
@@ -48,8 +49,13 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 		defaultSize: parseDefaultSize(parts["word/styles.xml"]),
 		media:       newMedia(zr),
 		embeds:      relTargets(parts["word/_rels/document.xml.rels"], "word"),
+		noteSrc:     map[string][]byte{"footnote": parts["word/footnotes.xml"], "endnote": parts["word/endnotes.xml"]},
 	}
 	blocks := p.parseDocument(doc)
+	// Appended after parsing so that note text never takes part in heading inference.
+	for _, d := range p.noteDefs {
+		blocks = append(blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: d})
+	}
 	return mdrender.Document(blocks), p.media.images, nil
 }
 
@@ -350,6 +356,24 @@ type parser struct {
 	media       *media
 	embeds      map[string]string
 	fields      []field
+	// boxes collects the text-box paragraphs anchored in the paragraph being read.
+	boxes []boxPara
+	// Footnotes and endnotes share one numbering in order of first reference.
+	// noteSrc holds the raw parts, noteText their parsed notes by kind and id
+	// (parsed on first use), noteNum the assigned numbers and noteDefs the finished
+	// "[^N]: text" lines.
+	noteSrc  map[string][]byte
+	noteText map[string]map[string]string
+	noteNum  map[string]int
+	noteDefs []string
+}
+
+// boxPara is a paragraph or table read outside the main flow, with what
+// parseDocument needs to place it.
+type boxPara struct {
+	blk   mdrender.Block
+	plain string
+	size  int
 }
 
 // parseDocument streams document.xml into blocks. Top-level paragraphs and tables
@@ -371,12 +395,15 @@ func (p *parser) parseDocument(b []byte) []mdrender.Block {
 		}
 		switch se.Name.Local {
 		case "sdtPr":
-			// The headings already carry the structure a generated TOC repeats with page numbers.
-			if isTOCGallery(dec) {
+			if sdtDropped(dec) {
 				skip(dec)
 			}
+		case "Fallback":
+			// The Choice branch of mc:AlternateContent was read already; this is its copy.
+			skip(dec)
 		case "p":
-			if blk, plain, size, ok := p.paragraphBlock(dec); ok {
+			blk, plain, size, ok := p.paragraphBlock(dec)
+			add := func(blk mdrender.Block, plain string, size int) {
 				if size == 0 {
 					size = p.defaultSize
 				}
@@ -385,6 +412,13 @@ func (p *parser) parseDocument(b []byte) []mdrender.Block {
 				plains = append(plains, plain)
 				styled = styled || blk.Kind == mdrender.Heading
 			}
+			if ok {
+				add(blk, plain, size)
+			}
+			for _, b := range p.boxes {
+				add(b.blk, b.plain, b.size)
+			}
+			p.boxes = nil
 		case "tbl":
 			if blk, ok := p.tableBlock(dec); ok {
 				blocks = append(blocks, blk)
@@ -400,9 +434,10 @@ func (p *parser) parseDocument(b []byte) []mdrender.Block {
 	return blocks
 }
 
-// isTOCGallery reads a w:sdtPr and reports whether the content control is Word's
-// built-in table of contents.
-func isTOCGallery(dec *xml.Decoder) bool {
+// sdtDropped reads a w:sdtPr and reports whether the content of the control is to
+// be dropped: Word's built-in table of contents (the headings already carry the
+// structure it repeats with page numbers) or an unfilled placeholder.
+func sdtDropped(dec *xml.Decoder) bool {
 	found := false
 	depth := 1
 	for depth > 0 {
@@ -413,8 +448,15 @@ func isTOCGallery(dec *xml.Decoder) bool {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			depth++
-			if t.Name.Local == "docPartGallery" && strings.EqualFold(attr(t, "val"), "Table of Contents") {
-				found = true
+			switch t.Name.Local {
+			case "docPartGallery":
+				if strings.EqualFold(attr(t, "val"), "Table of Contents") {
+					found = true
+				}
+			case "showingPlcHdr":
+				if toggle(attr(t, "val")) == on {
+					found = true
+				}
 			}
 		case xml.EndElement:
 			depth--
@@ -610,11 +652,73 @@ func (p *parser) inlineChild(dec *xml.Decoder, t xml.StartElement) []segment {
 			return nil
 		}
 		return p.inlineSegments(dec, t.Name.Local)
-	case "ins", "smartTag":
+	case "ins", "moveTo", "smartTag":
 		return p.inlineSegments(dec, t.Name.Local)
+	case "sdt":
+		return p.sdtInline(dec)
+	case "AlternateContent":
+		return p.altContent(dec)
 	}
 	skip(dec)
 	return nil
+}
+
+// sdtInline reads a run-level content control: its content is text like any other
+// unless it only shows a placeholder.
+func (p *parser) sdtInline(dec *xml.Decoder) []segment {
+	var segs []segment
+	drop := false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return segs
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "sdtPr":
+				drop = sdtDropped(dec)
+			case "sdtContent":
+				if drop {
+					skip(dec)
+				} else {
+					segs = append(segs, p.inlineSegments(dec, "sdtContent")...)
+				}
+			default:
+				skip(dec)
+			}
+		case xml.EndElement:
+			if t.Name.Local == "sdt" {
+				return segs
+			}
+		}
+	}
+}
+
+// altContent reads mc:AlternateContent and keeps only its first Choice or Fallback,
+// which would otherwise repeat the same content.
+func (p *parser) altContent(dec *xml.Decoder) []segment {
+	var segs []segment
+	done := false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return segs
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if n := t.Name.Local; !done && (n == "Choice" || n == "Fallback") {
+				done = true
+				segs = append(segs, p.inlineSegments(dec, n)...)
+			} else {
+				skip(dec)
+			}
+		case xml.EndElement:
+			if t.Name.Local == "AlternateContent" {
+				return segs
+			}
+		}
+	}
 }
 
 // inlineSegments reads inline children up to the end tag named end.
@@ -691,6 +795,7 @@ func (p *parser) runSegments(dec *xml.Decoder) []segment {
 		}
 	}
 	depth := 1
+	choice := false // inside this run's mc:AlternateContent, a Choice was seen
 	for depth > 0 {
 		tok, err := dec.Token()
 		if err != nil {
@@ -699,6 +804,20 @@ func (p *parser) runSegments(dec *xml.Decoder) []segment {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "AlternateContent":
+				choice = false
+			case "Choice":
+				choice = true
+			case "Fallback":
+				if choice {
+					skip(dec)
+				}
+			case "footnoteReference", "endnoteReference":
+				if m := p.noteRef(strings.TrimSuffix(t.Name.Local, "Reference"), attr(t, "id")); m != "" && p.visible() {
+					flush()
+					segs = append(segs, segment{text: m, raw: true})
+				}
+				skip(dec)
 			case "t":
 				if txt := readText(dec); p.visible() {
 					sb.WriteString(txt)
@@ -838,6 +957,16 @@ func renderSegments(segs []segment, format bool) string {
 }
 
 func (p *parser) tableBlock(dec *xml.Decoder) (mdrender.Block, bool) {
+	grid := p.tableGrid(dec)
+	if len(grid) == 0 {
+		return mdrender.Block{}, false
+	}
+	return mdrender.Block{Kind: mdrender.Table_, Text: mdrender.Table(grid)}, true
+}
+
+// tableGrid reads a w:tbl whose start tag was consumed into a normalised grid.
+// Content controls around rows are transparent.
+func (p *parser) tableGrid(dec *xml.Decoder) [][]string {
 	var grid [][]string
 	depth := 1
 	for depth > 0 {
@@ -850,6 +979,11 @@ func (p *parser) tableBlock(dec *xml.Decoder) (mdrender.Block, bool) {
 			switch t.Name.Local {
 			case "tr":
 				grid = append(grid, p.tableRow(dec))
+			case "sdt", "sdtContent":
+			case "sdtPr":
+				if sdtDropped(dec) {
+					skip(dec)
+				}
 			default:
 				skip(dec)
 			}
@@ -859,11 +993,25 @@ func (p *parser) tableBlock(dec *xml.Decoder) (mdrender.Block, bool) {
 			}
 		}
 	}
-	grid = mdrender.NormalizeGrid(grid)
-	if len(grid) == 0 {
-		return mdrender.Block{}, false
+	return mdrender.NormalizeGrid(grid)
+}
+
+// flattenGrid folds a nested table into one line: a Markdown cell holds no blocks,
+// so rows are joined with "; " and cells with ", ".
+func flattenGrid(grid [][]string) string {
+	var rows []string
+	for _, r := range grid {
+		var cells []string
+		for _, c := range r {
+			if c != "" {
+				cells = append(cells, c)
+			}
+		}
+		if len(cells) > 0 {
+			rows = append(rows, strings.Join(cells, ", "))
+		}
 	}
-	return mdrender.Block{Kind: mdrender.Table_, Text: mdrender.Table(grid)}, true
+	return strings.Join(rows, "; ")
 }
 
 func (p *parser) tableRow(dec *xml.Decoder) []string {
@@ -879,6 +1027,11 @@ func (p *parser) tableRow(dec *xml.Decoder) []string {
 			switch t.Name.Local {
 			case "tc":
 				row = append(row, p.cellText(dec))
+			case "sdt", "sdtContent":
+			case "sdtPr":
+				if sdtDropped(dec) {
+					skip(dec)
+				}
 			default:
 				skip(dec)
 			}
@@ -908,9 +1061,18 @@ func (p *parser) cellText(dec *xml.Decoder) string {
 				if blk, _, _, ok := p.paragraphBlock(dec); ok {
 					parts = append(parts, stripListMarker(blk))
 				}
+				for _, b := range p.boxes {
+					parts = append(parts, stripListMarker(b.blk))
+				}
+				p.boxes = nil
 			case "tbl":
-				if blk, ok := p.tableBlock(dec); ok {
-					parts = append(parts, blk.Text)
+				if s := flattenGrid(p.tableGrid(dec)); s != "" {
+					parts = append(parts, s)
+				}
+			case "sdt", "sdtContent":
+			case "sdtPr":
+				if sdtDropped(dec) {
+					skip(dec)
 				}
 			default:
 				skip(dec)
@@ -922,6 +1084,109 @@ func (p *parser) cellText(dec *xml.Decoder) string {
 		}
 	}
 	return collapseSpaces(strings.Join(parts, " "))
+}
+
+// blockContent reads the paragraphs and tables of a container such as a text box
+// (end is its tag name), including text boxes anchored inside it.
+func (p *parser) blockContent(dec *xml.Decoder, end string) []boxPara {
+	outer := p.boxes
+	p.boxes = nil
+	var out []boxPara
+loop:
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "p":
+				if blk, plain, size, ok := p.paragraphBlock(dec); ok {
+					out = append(out, boxPara{blk, plain, size})
+				}
+				out = append(out, p.boxes...)
+				p.boxes = nil
+			case "tbl":
+				if blk, ok := p.tableBlock(dec); ok {
+					out = append(out, boxPara{blk: blk, plain: blk.Text})
+				}
+			case "sdt", "sdtContent":
+			case "sdtPr":
+				if sdtDropped(dec) {
+					skip(dec)
+				}
+			default:
+				skip(dec)
+			}
+		case xml.EndElement:
+			if t.Name.Local == end {
+				break loop
+			}
+		}
+	}
+	p.boxes = outer
+	return out
+}
+
+// noteRef returns the "[^N]" marker for a footnote or endnote reference (kind is
+// "footnote" or "endnote"), numbering notes in order of first reference and
+// recording the definition. It returns "" if the note has no text.
+func (p *parser) noteRef(kind, id string) string {
+	key := kind + ":" + id
+	if n, ok := p.noteNum[key]; ok {
+		return "[^" + strconv.Itoa(n) + "]"
+	}
+	text := p.notes(kind)[id]
+	if text == "" {
+		return ""
+	}
+	if p.noteNum == nil {
+		p.noteNum = map[string]int{}
+	}
+	n := len(p.noteNum) + 1
+	p.noteNum[key] = n
+	p.noteDefs = append(p.noteDefs, "[^"+strconv.Itoa(n)+"]: "+text)
+	return "[^" + strconv.Itoa(n) + "]"
+}
+
+// notes parses footnotes.xml or endnotes.xml once. Separator and continuation
+// notes (w:type other than "normal") are not content. The note being parsed must
+// not see the field and text-box state of the paragraph that references it.
+func (p *parser) notes(kind string) map[string]string {
+	if m, ok := p.noteText[kind]; ok {
+		return m
+	}
+	m := map[string]string{}
+	if p.noteText == nil {
+		p.noteText = map[string]map[string]string{}
+	}
+	p.noteText[kind] = m
+	fields, boxes := p.fields, p.boxes
+	p.fields, p.boxes = nil, nil
+	defer func() { p.fields, p.boxes = fields, boxes }()
+
+	dec := xml.NewDecoder(bytes.NewReader(p.noteSrc[kind]))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != kind {
+			continue
+		}
+		if t := attr(se, "type"); t != "" && t != "normal" {
+			skip(dec)
+			continue
+		}
+		var parts []string
+		for _, b := range p.blockContent(dec, kind) {
+			parts = append(parts, stripListMarker(b.blk))
+		}
+		m[attr(se, "id")] = collapseSpaces(strings.Join(parts, " "))
+	}
+	return m
 }
 
 // stripListMarker returns a list block's text without its indent and marker.
@@ -1054,7 +1319,9 @@ func isSizeHeading(blk mdrender.Block, plain string, size, body int) bool {
 // picture returns the marker for the image inside a drawing, pict or object
 // element (closing is its tag name), or "" if there is none.
 func (p *parser) picture(dec *xml.Decoder, closing string) string {
-	id := embedID(dec, closing)
+	id := embedIDBox(dec, closing, func() {
+		p.boxes = append(p.boxes, p.blockContent(dec, "txbxContent")...)
+	})
 	if id == "" || p.media == nil {
 		return ""
 	}

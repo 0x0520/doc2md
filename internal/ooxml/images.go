@@ -95,6 +95,12 @@ func relTargets(b []byte, baseDir string) map[string]string {
 // embedID reads up to the closing tag and returns the relationship id of the first
 // image: DrawingML a:blip (r:embed) or legacy VML v:imagedata (r:id).
 func embedID(dec *xml.Decoder, closing string) string {
+	return embedIDBox(dec, closing, nil)
+}
+
+// embedIDBox is embedID that also hands a w:txbxContent to box, which must consume
+// the element through its end tag.
+func embedIDBox(dec *xml.Decoder, closing string, box func()) string {
 	id := ""
 	depth := 1
 	for depth > 0 {
@@ -105,6 +111,12 @@ func embedID(dec *xml.Decoder, closing string) string {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "txbxContent":
+				if box != nil {
+					box()
+				} else {
+					skip(dec)
+				}
 			case "blip":
 				if v := attr(t, "embed"); v != "" && id == "" {
 					id = v
