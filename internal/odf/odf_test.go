@@ -293,3 +293,64 @@ func TestSpeakerNotesDropped(t *testing.T) {
 		t.Errorf("got:\n%s", got)
 	}
 }
+
+// Notes follow the shared GFM convention: a reference in the text, the note at the end.
+func TestFootnotesAndEndnotes(t *testing.T) {
+	body := `<office:text><text:p>One<text:span><text:note text:note-class="footnote"><text:note-citation>7</text:note-citation>` +
+		`<text:note-body><text:p> The footnote text.</text:p></text:note-body></text:note></text:span>` +
+		` two<text:note text:note-class="endnote"><text:note-citation>i</text:note-citation>` +
+		`<text:note-body><text:p>The endnote text.</text:p></text:note-body></text:note>.</text:p>` +
+		`<text:p>After.</text:p></office:text>`
+	want := "One[^1] two[^2].\n\nAfter.\n\n[^1]: The footnote text.\n\n[^2]: The endnote text.\n"
+	if got := md(t, textType, body); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// Comments name their author and date, which must not reach the output.
+func TestAnnotationsAreDropped(t *testing.T) {
+	body := `<office:text><text:p>A commented <office:annotation office:name="0"><dc:creator>Jane Doe</dc:creator>` +
+		`<dc:date>2026-10-27T15:04:00</dc:date><text:p>A reviewer comment.</text:p></office:annotation>word` +
+		`<office:annotation-end office:name="0"/> here.</text:p></office:text>`
+	got := md(t, textType, strings.Replace(body, "<office:text>", `<office:text xmlns:dc="http://purl.org/dc/elements/1.1/">`, 1))
+	if want := "A commented word here.\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestTextBoxFollowsItsParagraph(t *testing.T) {
+	body := `<office:text><text:p>Before <draw:frame text:anchor-type="paragraph"><draw:text-box>` +
+		`<text:p>Boxed one.</text:p><text:p>Boxed two.</text:p></draw:text-box></draw:frame>after.</text:p>` +
+		`<text:p>Next.</text:p></office:text>`
+	want := "Before after.\n\nBoxed one.\n\nBoxed two.\n\nNext.\n"
+	if got := md(t, textType, body); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// Deleted text is stored in text:tracked-changes, not in the body.
+func TestTrackedChangesContributeNoText(t *testing.T) {
+	body := `<office:text><text:tracked-changes><text:changed-region text:id="ct1"><text:deletion>` +
+		`<office:change-info><dc:creator>Jane Doe</dc:creator></office:change-info>` +
+		`<text:p>Deleted words.</text:p></text:deletion></text:changed-region></text:tracked-changes>` +
+		`<text:p>Kept <text:change-start text:change-id="ct1"/><text:change-end text:change-id="ct1"/>text.</text:p></office:text>`
+	got := md(t, textType, strings.Replace(body, "<office:text>", `<office:text xmlns:dc="http://purl.org/dc/elements/1.1/">`, 1))
+	if want := "Kept text.\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestNestedTableIsFlattenedIntoTheCell(t *testing.T) {
+	inner := `<table:table><table:table-row><table:table-cell><text:p>a</text:p></table:table-cell>` +
+		`<table:table-cell><text:p>b</text:p></table:table-cell></table:table-row>` +
+		`<table:table-row><table:table-cell><text:p>c</text:p></table:table-cell>` +
+		`<table:table-cell><text:p>d</text:p></table:table-cell></table:table-row></table:table>`
+	body := `<office:text><table:table><table:table-row><table:table-cell><text:p>H1</text:p></table:table-cell>` +
+		`<table:table-cell><text:p>H2</text:p></table:table-cell></table:table-row>` +
+		`<table:table-row><table:table-cell><text:p>x</text:p></table:table-cell>` +
+		`<table:table-cell>` + inner + `<text:p/></table:table-cell></table:table-row></table:table></office:text>`
+	want := "| H1 | H2 |\n|---|---|\n| x | a, b; c, d |\n"
+	if got := md(t, textType, body); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}

@@ -5,6 +5,7 @@ package rtf
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,11 +28,18 @@ var skipDestinations = map[string]bool{
 	"fonttbl": true, "colortbl": true, "stylesheet": true, "info": true,
 	"pict": true, "header": true, "footer": true, "headerl": true, "headerr": true,
 	"headerf": true, "footerl": true, "footerr": true, "footerf": true,
-	"footnote": true, "annotation": true, "comment": true, "xe": true, "tc": true,
+	"annotation": true, "comment": true, "xe": true, "tc": true,
 	"filetbl": true, "revtbl": true, "listtable": true, "listoverridetable": true,
 	"object": true, "fldinst": true, "atnid": true, "atnauthor": true,
 	"pn": true, "pntxtb": true, "pntxta": true,
+	// A shape's \shprslt and a picture's \nonshppict are fallbacks for readers that
+	// do not understand \shp and \shppict; \nonesttables is the same for nested tables.
+	"shprslt": true, "nonshppict": true, "nonesttables": true,
 }
+
+// Ignorable (\*) destinations whose content is read after all: shapes with text
+// boxes, pictures and the rows of nested tables.
+var keepStar = map[string]bool{"shpinst": true, "shppict": true, "do": true, "nesttableprops": true}
 
 // Destinations holding the generated bullet or number of a list item. The text is
 // kept apart from the body and the paragraph is emitted as a list item instead.
@@ -84,34 +92,47 @@ type state struct {
 	skip   bool
 	marker bool
 	title  bool
-	uc     int
-	level  int
-	ls     int
-	ilvl   int
-	font   int
-	em     mdrender.Emphasis
-	base   mdrender.Emphasis
-	link   *mdrender.Link
+	// del marks text of a tracked deletion; itap is the table nesting depth of the paragraph.
+	del   bool
+	itap  int
+	uc    int
+	level int
+	ls    int
+	ilvl  int
+	font  int
+	em    mdrender.Emphasis
+	base  mdrender.Emphasis
+	link  *mdrender.Link
 }
 
 // parser accumulates blocks while walking the RTF source. Text goes to cell while
 // inside a table row, otherwise to para.
 type parser struct {
-	styles   stylesheet
-	lists    map[int][]int
-	fonts    map[int]*charmap.Charmap
-	docPage  *charmap.Charmap
-	defFont  int
-	blocks   []mdrender.Block
-	titles   []int
-	para     mdrender.Inline
-	label    strings.Builder
-	row      []string
-	cell     mdrender.Inline
-	grid     [][]string
-	cells    int
-	inRow    bool
-	listItem bool
+	styles  stylesheet
+	lists   map[int][]int
+	fonts   map[int]*charmap.Charmap
+	docPage *charmap.Charmap
+	defFont int
+	blocks  []mdrender.Block
+	titles  []int
+	para    mdrender.Inline
+	label   strings.Builder
+	row     []string
+	cell    mdrender.Inline
+	// nest and nestRow collect the cells of a nested table's row until \nestrow;
+	// nestRows counts the rows already flattened into the open cell.
+	nest     mdrender.Inline
+	nestRow  []string
+	nestRows int
+	// notes are the texts of footnotes and endnotes in order of reference. boxes and
+	// tableBoxes hold text box paragraphs, written after the paragraph or table they are anchored in.
+	notes      []string
+	boxes      []mdrender.Block
+	tableBoxes []mdrender.Block
+	grid       [][]string
+	cells      int
+	inRow      bool
+	listItem   bool
 	// tocField is set between a TOC field's instruction and its result;
 	// fieldLink holds the target of a HYPERLINK field until its result.
 	tocField  bool
@@ -141,6 +162,10 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	if len(p.blocks) == 0 {
 		return "", nil, ErrNotRTF
 	}
+	// GFM footnote definitions close the document; one sequence for footnotes and endnotes.
+	for i, n := range p.notes {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: fmt.Sprintf("[^%d]: %s", i+1, n)})
+	}
 	p.shiftHeadings()
 	return mdrender.Document(p.blocks), p.images, nil
 }
@@ -164,7 +189,10 @@ func (p *parser) shiftHeadings() {
 
 // walk scans s once, tracking group nesting; control words are handled in apply.
 func (p *parser) walk(s string) {
-	st := state{uc: 1, font: -1}
+	p.walkFrom(state{uc: 1, font: -1}, s)
+}
+
+func (p *parser) walkFrom(st state, s string) {
 	var stack []state
 	for i := 0; i < len(s); {
 		switch c := s[i]; c {
@@ -192,9 +220,52 @@ func (p *parser) walk(s string) {
 
 // apply handles one control word and returns the index to continue scanning from.
 func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int) int {
+	// Dropped text must not break paragraphs or rows either; a deleted paragraph
+	// mark joins its paragraph to the next.
+	if st.skip || st.del {
+		switch word {
+		case "par", "sect":
+			return next
+		case "cell", "row", "nestcell", "nestrow", "intbl", "trowd":
+			if st.skip {
+				return next
+			}
+		}
+	}
 	switch word {
-	// \* marks an ignorable destination: the rest of the group is dropped.
+	// \* marks an ignorable destination: the rest of the group is dropped, unless
+	// it is one of keepStar.
 	case "*":
+		if !keepStar[nextWord(s, next)] {
+			st.skip = true
+		}
+	case "deleted":
+		st.del = !hasArg || arg != 0
+	case "itap":
+		if hasArg {
+			st.itap = arg
+		}
+	case "nestcell":
+		p.endNestCell()
+	case "nestrow":
+		p.endNestRow()
+	case "footnote":
+		if st.del {
+			st.skip = true
+			return next
+		}
+		return p.note(*st, s, next)
+	case "shptxt", "dptxbxtext":
+		return p.textBox(*st, s, next)
+	// A shape's properties hold the picture of a floating image; their other values are not text.
+	case "sp":
+		if !st.skip && !st.del {
+			if end, body := pictGroup(s, next); end >= 0 {
+				if i := strings.Index(body, `{\pict`); i >= 0 {
+					p.picture(s, next+i+len(`{\pict`))
+				}
+			}
+		}
 		st.skip = true
 	case `\`, "{", "}":
 		p.emit(*st, word)
@@ -245,7 +316,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 	case "par", "sect":
 		p.flushParagraph(*st)
 	case "pard":
-		st.level, st.title, st.ls, st.ilvl, st.base = 0, false, 0, 0, mdrender.Emphasis{}
+		st.level, st.title, st.ls, st.ilvl, st.base, st.itap = 0, false, 0, 0, mdrender.Emphasis{}, 0
 	case "intbl", "trowd":
 		p.openRow(*st)
 	case "cell":
@@ -276,7 +347,11 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		}
 	// Pictures are decoded by picture; the rest of the group (hex data) is skipped.
 	case "pict":
+		deleted := st.skip || st.del
 		st.skip = true
+		if deleted {
+			return next
+		}
 		if end := p.picture(s, next); end > 0 {
 			return end
 		}
@@ -305,7 +380,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 	case "strike", "striked":
 		st.em.Strike = !hasArg || arg != 0
 	case "plain":
-		st.em = mdrender.Emphasis{}
+		st.em, st.del = mdrender.Emphasis{}, false
 	case "cs":
 		if cs, ok := p.styles.chars[arg]; ok && hasArg {
 			st.em.Bold = st.em.Bold || cs.Bold
@@ -342,7 +417,7 @@ func (p *parser) page(st state) *charmap.Charmap {
 // collected separately.
 func (p *parser) emit(st state, s string) {
 	switch {
-	case st.skip:
+	case st.skip || st.del:
 	case st.marker:
 		p.label.WriteString(s)
 	default:
@@ -356,6 +431,10 @@ func (p *parser) emit(st state, s string) {
 func (p *parser) write(st state, s string) {
 	em := mdrender.Emphasis{Bold: st.em.Bold && !st.base.Bold, Italic: st.em.Italic && !st.base.Italic, Strike: st.em.Strike && !st.base.Strike}
 	if p.inRow {
+		if st.itap > 1 {
+			p.nest.Add(s, em, st.link)
+			return
+		}
 		p.cell.Add(s, em, st.link)
 		return
 	}
@@ -376,6 +455,7 @@ func (p *parser) endCell() {
 	if !p.inRow {
 		return
 	}
+	p.closeNested()
 	p.row = append(p.row, squeeze(p.cell.Render(true)))
 	p.cell.Reset()
 	// A list label inside a cell belongs to the cell, not to the next paragraph.
@@ -386,7 +466,16 @@ func (p *parser) endCell() {
 	}
 }
 
+// closeNested flattens a nested row left open (no \nestrow) and ends the nested table.
+func (p *parser) closeNested() {
+	if !p.nest.Empty() || len(p.nestRow) > 0 {
+		p.endNestRow()
+	}
+	p.nestRows = 0
+}
+
 func (p *parser) endRow() {
+	p.closeNested()
 	if !p.cell.Empty() {
 		p.row = append(p.row, squeeze(p.cell.Render(true)))
 		p.cell.Reset()
@@ -418,9 +507,14 @@ func (p *parser) flushParagraph(st state) {
 	p.listItem = false
 	p.label.Reset()
 	if p.inRow {
-		p.cell.Add(" ", mdrender.Emphasis{}, nil)
+		if st.itap > 1 {
+			p.nest.Add(" ", mdrender.Emphasis{}, nil)
+		} else {
+			p.cell.Add(" ", mdrender.Emphasis{}, nil)
+		}
 		return
 	}
+	defer p.flushBoxes(&p.boxes)
 	txt := squeeze(p.para.Render(!st.title && st.level == 0))
 	p.para.Reset()
 	if txt == "" {
@@ -445,6 +539,7 @@ func (p *parser) flushParagraph(st state) {
 }
 
 func (p *parser) flushTable() {
+	defer p.flushBoxes(&p.tableBoxes)
 	if len(p.grid) == 0 {
 		return
 	}
@@ -812,4 +907,105 @@ func group(s string, i int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// nextWord returns the control word that starts at s[i], or "" if there is none.
+func nextWord(s string, i int) string {
+	if i >= len(s) || s[i] != '\\' {
+		return ""
+	}
+	w, _, _, _ := control(s, i)
+	return w
+}
+
+// subParse converts the body of a group on its own, with the document's fonts,
+// styles and pictures counters, and returns its blocks.
+func (p *parser) subParse(st state, body string) []mdrender.Block {
+	q := &parser{
+		styles: p.styles, lists: p.lists, fonts: p.fonts, docPage: p.docPage, defFont: p.defFont,
+		seq: p.seq, total: p.total, images: p.images,
+	}
+	q.walkFrom(state{uc: st.uc, font: st.font}, body)
+	q.flushParagraph(state{})
+	q.flushTable()
+	p.seq, p.total, p.images = q.seq, q.total, q.images
+	return q.blocks
+}
+
+// note reads the \footnote group whose content starts at from, records its text
+// and writes the reference into the text. It returns the index of the group's
+// closing brace. \chftn, the reference mark, produces no text of its own: the
+// number comes from the order of reference, shared by footnotes and endnotes.
+func (p *parser) note(st state, s string, from int) int {
+	end, body := pictGroup(s, from)
+	if end < 0 {
+		return from
+	}
+	var parts []string
+	for _, b := range p.subParse(st, body) {
+		parts = append(parts, b.Text)
+	}
+	p.notes = append(p.notes, strings.Join(parts, " "))
+	p.write(state{}, fmt.Sprintf("[^%d]", len(p.notes)))
+	return end
+}
+
+// textBox reads the text of a shape or legacy drawing object whose content starts
+// at from and queues it as paragraphs after the anchoring paragraph. It returns the
+// index of the group's closing brace.
+func (p *parser) textBox(st state, s string, from int) int {
+	if st.skip || st.del {
+		return from
+	}
+	end, body := pictGroup(s, from)
+	if end < 0 {
+		return from
+	}
+	for _, b := range p.subParse(st, body) {
+		if b.Kind == mdrender.Heading {
+			b.Kind = mdrender.Paragraph
+		}
+		if p.inRow {
+			p.tableBoxes = append(p.tableBoxes, b)
+		} else {
+			p.boxes = append(p.boxes, b)
+		}
+	}
+	return end
+}
+
+// endNestCell closes a cell of a nested table.
+func (p *parser) endNestCell() {
+	p.nestRow = append(p.nestRow, squeeze(p.nest.Render(true)))
+	p.nest.Reset()
+}
+
+// endNestRow flattens the nested row just read into the open outer cell: cells
+// joined by ", ", rows by "; ".
+func (p *parser) endNestRow() {
+	if !p.nest.Empty() {
+		p.endNestCell()
+	}
+	var cells []string
+	for _, c := range p.nestRow {
+		if c != "" {
+			cells = append(cells, c)
+		}
+	}
+	p.nestRow = nil
+	if len(cells) == 0 {
+		return
+	}
+	sep := " "
+	if p.nestRows > 0 {
+		sep = "; "
+	}
+	p.cell.Add(sep+strings.Join(cells, ", "), mdrender.Emphasis{}, nil)
+	p.nestRows++
+}
+
+// flushBoxes writes the queued text box paragraphs.
+func (p *parser) flushBoxes(boxes *[]mdrender.Block) {
+	p.blocks = append(p.blocks, *boxes...)
+	*boxes = nil
 }

@@ -308,13 +308,17 @@ type parser struct {
 	// cell text would add a bogus column or row, so they follow the table instead.
 	cellImages []string
 	inTable    bool
-	st         *styles
-	sheets     bool
-	zr         *zip.Reader
-	page       int
-	seq        int
-	total      int
-	images     []docimg.Image
+	// notes are the texts of footnotes and endnotes in order of reference; boxes hold
+	// paragraphs of text boxes, written after the paragraph or table they are anchored in.
+	notes  []string
+	boxes  []string
+	st     *styles
+	sheets bool
+	zr     *zip.Reader
+	page   int
+	seq    int
+	total  int
+	images []docimg.Image
 }
 
 func (p *parser) walk(content []byte) []mdrender.Block {
@@ -336,6 +340,10 @@ func (p *parser) walk(content []byte) []mdrender.Block {
 				p.frames = p.frames[:len(p.frames)-1]
 			}
 		}
+	}
+	// GFM footnote definitions close the document; one sequence for footnotes and endnotes.
+	for i, n := range p.notes {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: fmt.Sprintf("[^%d]: %s", i+1, n)})
 	}
 	return p.blocks
 }
@@ -360,8 +368,12 @@ func (p *parser) shiftHeadings() {
 func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 	switch ns(t.Name) {
 	case "office":
-		if t.Name.Local == "spreadsheet" {
+		switch t.Name.Local {
+		case "spreadsheet":
 			p.sheets = true
+		// Comments carry the reviewer's name and date; they are never output.
+		case "annotation", "annotation-end":
+			_ = dec.Skip()
 		}
 	case "presentation":
 		// Speaker notes are not slide content; the PPTX reader leaves them out too.
@@ -385,6 +397,7 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 	case "text":
 		switch t.Name.Local {
 		case "h":
+			defer p.flushBoxes()
 			level, _ := strconv.Atoi(attr(t, "text", "outline-level"))
 			if level < 1 {
 				level = 1
@@ -393,6 +406,7 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: level, Text: txt})
 			}
 		case "p":
+			defer p.flushBoxes()
 			style := attr(t, "text", "style-name")
 			// Headings carry no emphasis; in a list a title style does not make a heading.
 			heading := len(p.lists) == 0 && (p.inTitleFrame() || p.st.isTitle(style))
@@ -425,8 +439,9 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 				name = p.lists[len(p.lists)-1]
 			}
 			p.lists = append(p.lists, name)
-		// The table of contents is generated text with page numbers.
-		case "table-of-content":
+		// The table of contents is generated text with page numbers. Deleted text
+		// lives in the tracked changes, which are not part of the document's text.
+		case "table-of-content", "tracked-changes":
 			_ = dec.Skip()
 		}
 	case "table":
@@ -441,6 +456,7 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 		p.inTable = true
 		grid := p.readTable(dec)
 		p.inTable = false
+		defer p.flushBoxes()
 		defer p.flushCellImages()
 		grid = mdrender.NormalizeGrid(grid)
 		if len(grid) == 0 {
@@ -499,6 +515,9 @@ func (p *parser) inline(dec *xml.Decoder, format bool) string {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if p.special(dec, t, &b) {
+				continue
+			}
 			depth++
 			stack = append(stack, cur)
 			switch ns(t.Name) {
@@ -512,10 +531,6 @@ func (p *parser) inline(dec *xml.Decoder, format bool) string {
 					if url := linkTarget(attr(t, "", "href")); url != "" {
 						cur.link = &mdrender.Link{URL: url}
 					}
-				}
-			case "table":
-				if t.Name.Local == "table" {
-					p.markObject()
 				}
 			case nsDrawing:
 				switch t.Name.Local {
@@ -547,6 +562,130 @@ func (p *parser) inline(dec *xml.Decoder, format bool) string {
 	}
 	p.frames = p.frames[:open]
 	return strings.Join(strings.Fields(b.Render(format)), " ")
+}
+
+// special handles the elements inside running text that are not part of it,
+// that leave the paragraph or that nest a document structure. It reports whether
+// it consumed the element through its end tag.
+func (p *parser) special(dec *xml.Decoder, t xml.StartElement, b *mdrender.Inline) bool {
+	switch ns(t.Name) {
+	case "office":
+		if t.Name.Local == "annotation" || t.Name.Local == "annotation-end" {
+			_ = dec.Skip()
+			return true
+		}
+	case "text":
+		switch t.Name.Local {
+		case "tracked-changes":
+			_ = dec.Skip()
+			return true
+		case "note":
+			b.Add(p.note(dec), mdrender.Emphasis{}, nil)
+			return true
+		}
+	case "table":
+		// A nested table is flattened into its cell.
+		if t.Name.Local == "table" {
+			p.markObject()
+			if txt := p.flatTable(dec); txt != "" {
+				b.Add(" "+txt+" ", mdrender.Emphasis{}, nil)
+			}
+			return true
+		}
+	case nsDrawing:
+		if t.Name.Local == "text-box" {
+			p.textBox(dec)
+			return true
+		}
+	}
+	return false
+}
+
+// note reads a footnote or endnote, consuming it through its end tag, records its
+// text and returns the reference that stands in the paragraph. The citation label
+// inside the note is the producer's own numbering and is ignored.
+func (p *parser) note(dec *xml.Decoder) string {
+	idx := len(p.notes)
+	p.notes = append(p.notes, "") // reserve the number before nested content is read
+	var parts []string
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if ns(t.Name) == "text" && (t.Name.Local == "p" || t.Name.Local == "h") {
+				if txt := p.inline(dec, true); txt != "" {
+					parts = append(parts, txt)
+				}
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	p.notes[idx] = strings.Join(parts, " ")
+	return fmt.Sprintf("[^%d]", idx+1)
+}
+
+// textBox reads the paragraphs of a text box, consuming it through its end tag.
+// They are queued to follow the paragraph the box is anchored in: floating text
+// has no place in the middle of a sentence.
+func (p *parser) textBox(dec *xml.Decoder) {
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if ns(t.Name) == "text" && (t.Name.Local == "p" || t.Name.Local == "h") {
+				if txt := p.inline(dec, true); txt != "" {
+					p.boxes = append(p.boxes, txt)
+				}
+				continue
+			}
+			if ns(t.Name) == "table" && t.Name.Local == "table" {
+				if txt := p.flatTable(dec); txt != "" {
+					p.boxes = append(p.boxes, txt)
+				}
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+}
+
+// flatTable reads a table, consuming it through its end tag, and returns it as
+// one line: rows joined by "; ", cells by ", ".
+func (p *parser) flatTable(dec *xml.Decoder) string {
+	var rows []string
+	for _, r := range p.readTable(dec) {
+		var cells []string
+		for _, c := range r {
+			if c != "" {
+				cells = append(cells, c)
+			}
+		}
+		if len(cells) > 0 {
+			rows = append(rows, strings.Join(cells, ", "))
+		}
+	}
+	return strings.Join(rows, "; ")
+}
+
+// flushBoxes writes the queued text box paragraphs.
+func (p *parser) flushBoxes() {
+	for _, txt := range p.boxes {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: txt})
+	}
+	p.boxes = nil
 }
 
 // readTable reads the rows of a table, consuming it through its end tag.

@@ -176,3 +176,75 @@ func TestNotRTF(t *testing.T) {
 		t.Fatal("expected an error for non-RTF bytes, got nil")
 	}
 }
+
+func TestTrackedDeletionIsDropped(t *testing.T) {
+	in := `{\rtf1\ansi\pard {\revised Kept, }{\deleted removed, \par}more.\par}`
+	if got, want := md(t, in), "Kept, more.\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// \deleted0 and \plain end the deletion.
+	in = `{\rtf1\ansi\pard A {\deleted gone \deleted0 back}\par}`
+	if got, want := md(t, in), "A back\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Footnotes and endnotes share one sequence; \chftn makes no text of its own.
+func TestFootnotesAndEndnotes(t *testing.T) {
+	in := `{\rtf1\ansi\pard One{\super\chftn {\footnote \pard\plain {\super\chftn } The footnote.}} ` +
+		`two{\super\chftn {\footnote\ftnalt \pard\plain {\super\chftn } The endnote.\par}}.\par` +
+		`\pard After.\par}`
+	want := "One[^1] two[^2].\n\nAfter.\n\n[^1]: The footnote.\n\n[^2]: The endnote.\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// Word writes a text box twice: as \shptxt and, for old readers, again in \shprslt.
+func TestTextBoxFollowsItsParagraph(t *testing.T) {
+	in := `{\rtf1\ansi\pard Before {\shp{\*\shpinst\shpleft1{\sp{\sn wzName}{\sv Box 1}}` +
+		`{\shptxt \pard Boxed one.\par\pard Boxed two.\par}}` +
+		`{\shprslt{\*\do\dptxbx{\dptxbxtext \pard Boxed one.\par\pard Boxed two.\par}\dpx1}}}after.\par` +
+		`\pard Next.\par}`
+	want := "Before after.\n\nBoxed one.\n\nBoxed two.\n\nNext.\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+func TestLegacyTextBox(t *testing.T) {
+	in := `{\rtf1\ansi\pard Before {\*\do\dobxcolumn\dptxbx{\dptxbxtext \pard Boxed.\par}\dpx1}after.\par}`
+	if got, want := md(t, in), "Before after.\n\nBoxed.\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A picture is written as \shppict and again as \nonshppict; it counts once.
+func TestShapePictureIsNotDoubled(t *testing.T) {
+	in := `{\rtf1\ansi\pard A {\*\shppict{\pict\pngblip 89504e47}}{\nonshppict{\pict\pngblip 89504e47}} B\par}`
+	got, imgs, err := ToMarkdown([]byte(in))
+	if err != nil || len(imgs) != 1 || strings.Count(got, "[Image") != 1 {
+		t.Errorf("got %q, %d images, err %v", got, len(imgs), err)
+	}
+}
+
+// Comments name an author and may span paragraphs; none of it reaches the output.
+func TestCommentsAreDropped(t *testing.T) {
+	in := `{\rtf1\ansi\pard A commented {\*\atrfstart 1}word{\*\atrfend 1}{\*\atnid DL}{\*\atnauthor Jane Doe}\chatn ` +
+		`{\*\annotation{\*\atnref 1}{\*\atndate 1206574020}\pard A reviewer comment.\par Second paragraph.\par} here.\par}`
+	if got, want := md(t, in), "A commented word here.\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestNestedTableIsFlattenedIntoTheCell(t *testing.T) {
+	in := `{\rtf1\ansi\trowd\cellx1000\cellx2000\pard\intbl H1\cell H2\cell\row` +
+		`\trowd\cellx1000\cellx2000\pard\intbl x\cell\pard\intbl\itap2 a\nestcell b\nestcell{\nonesttables\par}` +
+		`{\*\nesttableprops\trowd\cellx500\nestrow}` +
+		`\pard\intbl\itap2 c\nestcell d\nestcell{\nonesttables\par}{\*\nesttableprops\trowd\cellx500\nestrow}` +
+		`\pard\intbl\cell\row}`
+	want := "| H1 | H2 |\n|---|---|\n| x | a, b; c, d |\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
