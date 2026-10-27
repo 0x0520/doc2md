@@ -3,6 +3,7 @@ package htmldoc
 import (
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -45,10 +46,10 @@ func isMsoIgnore(n *html.Node) bool {
 // Word writes either the "mso-list" style with the marker in an Ignore span, or
 // (filtered HTML) only a MsoListBullet/MsoListNumber/MsoListParagraph class
 // with the marker as leading text.
-func wordListItem(p *html.Node, sink ImageSink) (mdrender.Block, bool) {
-	level, ordered, ok := 1, false, false
+func wordListItem(p *html.Node, sink ImageSink, indents *[]float64) (mdrender.Block, bool) {
+	level, ordered, ok, explicit := 1, false, false, false
 	if m := msoListRe.FindStringSubmatch(Attr(p, "style")); m != nil {
-		level, ok = atoiClamped(m[1]), true
+		level, ok, explicit = atoiClamped(m[1]), true, true
 	}
 	for _, c := range strings.Fields(Attr(p, "class")) {
 		switch {
@@ -56,7 +57,7 @@ func wordListItem(p *html.Node, sink ImageSink) (mdrender.Block, bool) {
 			ordered = strings.HasPrefix(c, "MsoListNumber")
 			// "List Bullet 2" is exported as MsoListBullet2; the CxSp variants have no digit.
 			if d := strings.TrimPrefix(strings.TrimPrefix(c, "MsoListBullet"), "MsoListNumber"); d != "" && d[0] >= '2' && d[0] <= '9' {
-				level = int(d[0] - '0')
+				level, explicit = int(d[0]-'0'), true
 			}
 			ok = true
 		case strings.HasPrefix(c, "MsoListParagraph"):
@@ -65,6 +66,11 @@ func wordListItem(p *html.Node, sink ImageSink) (mdrender.Block, bool) {
 	}
 	if !ok {
 		return mdrender.Block{}, false
+	}
+	if explicit {
+		*indents = nil
+	} else {
+		level = indentLevel(indents, marginLeft(p))
 	}
 
 	s := inlineText(p, sink)
@@ -82,6 +88,52 @@ func wordListItem(p *html.Node, sink ImageSink) (mdrender.Block, bool) {
 		marker = "1. "
 	}
 	return mdrender.Block{Kind: mdrender.List, Text: strings.Repeat("  ", level-1) + marker + s}, true
+}
+
+var marginLeftRe = regexp.MustCompile(`(?i)(?:^|[;\s])margin-left:\s*(-?[\d.]+)\s*(pt|cm|mm|in|px)?`)
+
+// defaultListIndent is the left margin (pt) of Word's List Paragraph style. The
+// filtered export omits margin-left when it equals the style's, so absence means this.
+const defaultListIndent = 36.0
+
+// marginLeft returns the paragraph's left margin in points.
+func marginLeft(p *html.Node) float64 {
+	m := marginLeftRe.FindStringSubmatch(Attr(p, "style"))
+	if m == nil {
+		return defaultListIndent
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return defaultListIndent
+	}
+	switch strings.ToLower(m[2]) {
+	case "cm":
+		v *= 72 / 2.54
+	case "mm":
+		v *= 72 / 25.4
+	case "in":
+		v *= 72
+	case "px":
+		v *= 0.75
+	}
+	return v
+}
+
+// indentLevel maps a margin to a list level within a run of consecutive items
+// by comparing it with the margins seen so far: deeper than the last item opens
+// a level, shallower closes levels. Filtered HTML drops mso-list, so the
+// indentation is all that tells the levels apart.
+func indentLevel(stack *[]float64, indent float64) int {
+	const eps = 0.5
+	s := *stack
+	for len(s) > 0 && indent < s[len(s)-1]-eps {
+		s = s[:len(s)-1]
+	}
+	if len(s) == 0 || indent > s[len(s)-1]+eps {
+		s = append(s, indent)
+	}
+	*stack = s
+	return min(len(s), 9)
 }
 
 // atoiClamped parses a level, limited to a depth a Markdown list can show.
