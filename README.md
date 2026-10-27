@@ -156,6 +156,20 @@ Review golden diffs as part of every change.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## How this project is built
+
+doc2md is developed with [Claude](https://www.anthropic.com/claude), Anthropic's AI
+model, as a coding assistant. Much of the code, tests and documentation is written
+by Claude under the maintainer's supervision: the maintainer sets the direction,
+reviews the changes and decides what is merged. Commits with AI involvement carry a
+`Co-Authored-By: Claude` trailer.
+
+The safeguards do not depend on who wrote a change: every behaviour is covered by
+tests, PDF layout by golden files, all readers are fuzzed against malformed input,
+and conversions are checked against documents produced by the real Office
+applications (`tools/officefixtures`). If you find a bug, please report it like any
+other.
+
 ## License
 
 [Apache License 2.0](LICENSE)
