@@ -2,6 +2,7 @@ package htmldoc
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -131,4 +132,31 @@ func splitLeadingMarker(s string, hintOrdered bool) (rest string, ordered bool) 
 // punctuation that opens a sentence.
 func isBulletRune(r rune) bool {
 	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune(`("'*_[<“‘«`, r)
+}
+
+// isWordTitle reports whether n is a paragraph in Word's Title style.
+func isWordTitle(n *html.Node) bool {
+	for _, c := range strings.Fields(Attr(n, "class")) {
+		if c == "MsoTitle" || strings.HasPrefix(c, "MsoTitleCx") {
+			return true
+		}
+	}
+	return false
+}
+
+// titleLevel marks a Word title during the walk; promoteTitle turns it into the
+// top heading and moves every real heading one level down, as the DOCX reader does.
+const titleLevel = 0
+
+func promoteTitle(blocks []mdrender.Block) {
+	if !slices.ContainsFunc(blocks, func(b mdrender.Block) bool {
+		return b.Kind == mdrender.Heading && b.Level == titleLevel
+	}) {
+		return
+	}
+	for i := range blocks {
+		if blocks[i].Kind == mdrender.Heading {
+			blocks[i].Level++
+		}
+	}
 }

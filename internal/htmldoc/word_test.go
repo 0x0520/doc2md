@@ -97,3 +97,12 @@ func TestWord_ConditionalCommentsDoNotLeak(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestWord_TitleIsTopHeading(t *testing.T) {
+	got := md(t, `<html><body><p class=MsoTitle>Product Specification</p>`+
+		`<h1>1 Introduction</h1><p>Text.</p><h2>1.1 Scope</h2></body></html>`)
+	want := "# Product Specification\n\n## 1 Introduction\n\nText.\n\n### 1.1 Scope"
+	if got != want {
+		t.Errorf("got:\n%q\nwant:\n%q", got, want)
+	}
+}

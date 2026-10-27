@@ -47,6 +47,7 @@ func ToMarkdownWith(data []byte, sink ImageSink) (string, error) {
 	}
 	var blocks []mdrender.Block
 	walk(root, &blocks, sink)
+	promoteTitle(blocks)
 	// Skip the <title> when the body already opens with the same heading; every
 	// EPUB chapter repeats it in <head> and <h1>.
 	if t := findTitle(root); t != "" && !samePhrase(t, firstHeading(blocks)) {
@@ -116,6 +117,12 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 			}
 		case atom.P, atom.Blockquote, atom.Dd, atom.Dt, atom.Figcaption, atom.Caption:
 			if c.DataAtom == atom.P {
+				if isWordTitle(c) {
+					if s := inlineText(c, sink); s != "" {
+						*out = append(*out, mdrender.Block{Kind: mdrender.Heading, Level: titleLevel, Text: s})
+					}
+					continue
+				}
 				if item, ok := wordListItem(c, sink); ok {
 					*out = append(*out, item)
 					continue
