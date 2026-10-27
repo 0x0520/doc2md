@@ -89,9 +89,9 @@ type state struct {
 	ls     int
 	ilvl   int
 	font   int
-	em     emphasis
-	base   emphasis
-	link   *link
+	em     mdrender.Emphasis
+	base   mdrender.Emphasis
+	link   *mdrender.Link
 }
 
 // parser accumulates blocks while walking the RTF source. Text goes to cell while
@@ -104,10 +104,10 @@ type parser struct {
 	defFont  int
 	blocks   []mdrender.Block
 	titles   []int
-	para     inline
+	para     mdrender.Inline
 	label    strings.Builder
 	row      []string
-	cell     inline
+	cell     mdrender.Inline
 	grid     [][]string
 	cells    int
 	inRow    bool
@@ -115,7 +115,7 @@ type parser struct {
 	// tocField is set between a TOC field's instruction and its result;
 	// fieldLink holds the target of a HYPERLINK field until its result.
 	tocField  bool
-	fieldLink *link
+	fieldLink *mdrender.Link
 
 	seq    int
 	total  int
@@ -245,7 +245,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 	case "par", "sect":
 		p.flushParagraph(*st)
 	case "pard":
-		st.level, st.title, st.ls, st.ilvl, st.base = 0, false, 0, 0, emphasis{}
+		st.level, st.title, st.ls, st.ilvl, st.base = 0, false, 0, 0, mdrender.Emphasis{}
 	case "intbl", "trowd":
 		p.openRow(*st)
 	case "cell":
@@ -289,7 +289,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		code := fieldCode(s, next)
 		p.tocField = isTOC(code)
 		if url := hyperlinkTarget(code); url != "" {
-			p.fieldLink = &link{url}
+			p.fieldLink = &mdrender.Link{URL: url}
 		}
 	case "fldrslt":
 		if p.tocField {
@@ -299,18 +299,18 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		st.link = p.fieldLink
 	// A switch with argument 0 turns the property off.
 	case "b":
-		st.em.bold = !hasArg || arg != 0
+		st.em.Bold = !hasArg || arg != 0
 	case "i":
-		st.em.italic = !hasArg || arg != 0
+		st.em.Italic = !hasArg || arg != 0
 	case "strike", "striked":
-		st.em.strike = !hasArg || arg != 0
+		st.em.Strike = !hasArg || arg != 0
 	case "plain":
-		st.em = emphasis{}
+		st.em = mdrender.Emphasis{}
 	case "cs":
 		if cs, ok := p.styles.chars[arg]; ok && hasArg {
-			st.em.bold = st.em.bold || cs.bold
-			st.em.italic = st.em.italic || cs.italic
-			st.em.strike = st.em.strike || cs.strike
+			st.em.Bold = st.em.Bold || cs.Bold
+			st.em.Italic = st.em.Italic || cs.Italic
+			st.em.Strike = st.em.Strike || cs.Strike
 		}
 	default:
 		switch {
@@ -354,12 +354,12 @@ func (p *parser) emit(st state, s string) {
 // paragraph's style as direct formatting; emphasis the style itself carries is
 // dropped, as the DOCX reader drops it, so only the author's own marking remains.
 func (p *parser) write(st state, s string) {
-	em := emphasis{st.em.bold && !st.base.bold, st.em.italic && !st.base.italic, st.em.strike && !st.base.strike}
+	em := mdrender.Emphasis{Bold: st.em.Bold && !st.base.Bold, Italic: st.em.Italic && !st.base.Italic, Strike: st.em.Strike && !st.base.Strike}
 	if p.inRow {
-		p.cell.add(s, em, st.link)
+		p.cell.Add(s, em, st.link)
 		return
 	}
-	p.para.add(s, em, st.link)
+	p.para.Add(s, em, st.link)
 }
 
 // openRow starts a table row, flushing any open paragraph so it stays outside the table.
@@ -376,8 +376,8 @@ func (p *parser) endCell() {
 	if !p.inRow {
 		return
 	}
-	p.row = append(p.row, squeeze(p.cell.render(true)))
-	p.cell.reset()
+	p.row = append(p.row, squeeze(p.cell.Render(true)))
+	p.cell.Reset()
 	// A list label inside a cell belongs to the cell, not to the next paragraph.
 	p.listItem = false
 	p.label.Reset()
@@ -387,9 +387,9 @@ func (p *parser) endCell() {
 }
 
 func (p *parser) endRow() {
-	if !p.cell.empty() {
-		p.row = append(p.row, squeeze(p.cell.render(true)))
-		p.cell.reset()
+	if !p.cell.Empty() {
+		p.row = append(p.row, squeeze(p.cell.Render(true)))
+		p.cell.Reset()
 	}
 	if len(p.row) > 0 {
 		p.grid = append(p.grid, p.row)
@@ -418,11 +418,11 @@ func (p *parser) flushParagraph(st state) {
 	p.listItem = false
 	p.label.Reset()
 	if p.inRow {
-		p.cell.add(" ", emphasis{}, nil)
+		p.cell.Add(" ", mdrender.Emphasis{}, nil)
 		return
 	}
-	txt := squeeze(p.para.render(!st.title && st.level == 0))
-	p.para.reset()
+	txt := squeeze(p.para.Render(!st.title && st.level == 0))
+	p.para.Reset()
 	if txt == "" {
 		return
 	}
@@ -581,13 +581,13 @@ func isTOC(code string) bool {
 type stylesheet struct {
 	levels map[int]int
 	titles map[int]bool
-	chars  map[int]emphasis
-	paras  map[int]emphasis
+	chars  map[int]mdrender.Emphasis
+	paras  map[int]mdrender.Emphasis
 }
 
 // parseStylesheet reads the paragraph (\sN) and character (\csN) styles from the stylesheet.
 func parseStylesheet(s string) stylesheet {
-	out := stylesheet{levels: map[int]int{}, titles: map[int]bool{}, chars: map[int]emphasis{}, paras: map[int]emphasis{}}
+	out := stylesheet{levels: map[int]int{}, titles: map[int]bool{}, chars: map[int]mdrender.Emphasis{}, paras: map[int]mdrender.Emphasis{}}
 	start := strings.Index(s, `{\stylesheet`)
 	if start < 0 {
 		return out
@@ -598,18 +598,18 @@ func parseStylesheet(s string) stylesheet {
 	}
 	eachGroup(body, func(entry string) {
 		num, lvl, isPara := 0, -1, false
-		csNum, cs, isChar := 0, emphasis{}, false
+		csNum, cs, isChar := 0, mdrender.Emphasis{}, false
 		topWords(entry, func(word string, arg int, hasArg bool) {
 			on := !hasArg || arg != 0
 			switch {
 			case word == "cs" && hasArg:
 				csNum, isChar = arg, true
 			case word == "b":
-				cs.bold = on
+				cs.Bold = on
 			case word == "i":
-				cs.italic = on
+				cs.Italic = on
 			case word == "strike" || word == "striked":
-				cs.strike = on
+				cs.Strike = on
 			case word == "s" && hasArg:
 				num, isPara = arg, true
 			case word == "outlinelevel" && hasArg && arg >= 0 && arg <= 8:

@@ -827,88 +827,14 @@ func (p *parser) hyperlink(dec *xml.Decoder, start xml.StartElement) []segment {
 }
 
 // emphasis is the set of Markdown inline markers a segment carries.
-type emphasis struct{ bold, italic, strike bool }
-
-// renderSegments joins segments into one string. With format set, adjacent runs of
-// equal formatting merge (Word splits text into many runs) and are wrapped in
-// **bold**, _italic_ and ~~strike~~. Whitespace-only runs are never emphasised
-// themselves; they take the formatting their neighbours share, so "bold space bold"
-// stays one span.
+// renderSegments joins segments into one string; with format set, emphasis is
+// merged and rendered as mdrender.Join describes.
 func renderSegments(segs []segment, format bool) string {
-	var sb strings.Builder
-	if !format {
-		for _, s := range segs {
-			sb.WriteString(s.text)
-		}
-		return sb.String()
-	}
-
-	n := len(segs)
-	em := make([]emphasis, n)
-	blank := make([]bool, n)
+	ps := make([]mdrender.Piece, len(segs))
 	for i, s := range segs {
-		if s.raw {
-			continue
-		}
-		em[i] = emphasis{s.bold, s.italic, s.strike}
-		blank[i] = strings.TrimSpace(s.text) == ""
+		ps[i] = mdrender.Piece{Text: s.text, Raw: s.raw, Em: mdrender.Emphasis{Bold: s.bold, Italic: s.italic, Strike: s.strike}}
 	}
-	next := make([]emphasis, n)
-	var cur emphasis
-	for i := n - 1; i >= 0; i-- {
-		next[i] = cur
-		if !blank[i] {
-			cur = em[i]
-		}
-	}
-	cur = emphasis{}
-	for i := range segs {
-		if blank[i] {
-			prev, nxt := cur, next[i]
-			em[i] = emphasis{prev.bold && nxt.bold, prev.italic && nxt.italic, prev.strike && nxt.strike}
-		} else {
-			cur = em[i]
-		}
-	}
-
-	for i := 0; i < n; {
-		j := i + 1
-		if !segs[i].raw {
-			for j < n && !segs[j].raw && em[j] == em[i] {
-				j++
-			}
-		}
-		var group strings.Builder
-		for _, s := range segs[i:j] {
-			group.WriteString(s.text)
-		}
-		sb.WriteString(emphasize(group.String(), em[i]))
-		i = j
-	}
-	return sb.String()
-}
-
-// emphasize wraps the text in the markers of e, keeping edge whitespace outside
-// them: "** bold**" is not emphasis in Markdown.
-func emphasize(s string, e emphasis) string {
-	if e == (emphasis{}) {
-		return s
-	}
-	core := strings.TrimSpace(s)
-	if core == "" {
-		return s
-	}
-	lead, trail, _ := strings.Cut(s, core)
-	if e.strike {
-		core = "~~" + core + "~~"
-	}
-	if e.italic {
-		core = "_" + core + "_"
-	}
-	if e.bold {
-		core = "**" + core + "**"
-	}
-	return lead + core + trail
+	return mdrender.Join(ps, format)
 }
 
 func (p *parser) tableBlock(dec *xml.Decoder) (mdrender.Block, bool) {

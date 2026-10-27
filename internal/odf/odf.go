@@ -216,7 +216,7 @@ func lineThrough(v string) setting {
 // emphasis of the surrounding text: the style's own settings win over its
 // parents', and what none sets is inherited. The chain is followed at most 10
 // steps to survive cycles.
-func (s *styles) emphasis(name string, base emphasis) emphasis {
+func (s *styles) emphasis(name string, base mdrender.Emphasis) mdrender.Emphasis {
 	var bold, italic, strike setting
 	for i := 0; name != "" && i < 10; i++ {
 		ts, ok := s.texts[name]
@@ -226,10 +226,10 @@ func (s *styles) emphasis(name string, base emphasis) emphasis {
 		bold, italic, strike = first(bold, ts.bold), first(italic, ts.italic), first(strike, ts.strike)
 		name = ts.parent
 	}
-	return emphasis{
-		bold:   pick(bold, base.bold),
-		italic: pick(italic, base.italic),
-		strike: pick(strike, base.strike),
+	return mdrender.Emphasis{
+		Bold:   pick(bold, base.Bold),
+		Italic: pick(italic, base.Italic),
+		Strike: pick(strike, base.Strike),
 	}
 }
 
@@ -477,8 +477,8 @@ func (p *parser) imageMarker(t xml.StartElement) string {
 
 // textState is the formatting in force at a point of running text.
 type textState struct {
-	em   emphasis
-	link *link
+	em   mdrender.Emphasis
+	link *mdrender.Link
 }
 
 // inline returns the text of the element just opened, consuming it through its
@@ -487,7 +487,7 @@ type textState struct {
 // otherwise. Space, tab, line-break and nested paragraph elements become one
 // space, since the result is a single Markdown line.
 func (p *parser) inline(dec *xml.Decoder, format bool) string {
-	var b inline
+	var b mdrender.Inline
 	var cur textState
 	var stack []textState // the state outside each open element
 	depth := 1
@@ -505,12 +505,12 @@ func (p *parser) inline(dec *xml.Decoder, format bool) string {
 			case "text":
 				switch t.Name.Local {
 				case "s", "tab", "line-break", "p", "h":
-					b.add(" ", cur.em, cur.link)
+					b.Add(" ", cur.em, cur.link)
 				case "span":
 					cur.em = p.st.emphasis(attr(t, "text", "style-name"), cur.em)
 				case "a":
 					if url := linkTarget(attr(t, "", "href")); url != "" {
-						cur.link = &link{url}
+						cur.link = &mdrender.Link{URL: url}
 					}
 				}
 			case "table":
@@ -528,7 +528,7 @@ func (p *parser) inline(dec *xml.Decoder, format bool) string {
 						if p.inTable {
 							p.cellImages = append(p.cellImages, mk)
 						} else {
-							b.add(" "+mk+" ", emphasis{}, cur.link)
+							b.Add(" "+mk+" ", mdrender.Emphasis{}, cur.link)
 						}
 					}
 				}
@@ -538,15 +538,15 @@ func (p *parser) inline(dec *xml.Decoder, format bool) string {
 				p.frames = p.frames[:len(p.frames)-1]
 			}
 			if depth--; depth == 0 {
-				return strings.Join(strings.Fields(b.render(format)), " ")
+				return strings.Join(strings.Fields(b.Render(format)), " ")
 			}
 			cur, stack = stack[len(stack)-1], stack[:len(stack)-1]
 		case xml.CharData:
-			b.add(string(t), cur.em, cur.link)
+			b.Add(string(t), cur.em, cur.link)
 		}
 	}
 	p.frames = p.frames[:open]
-	return strings.Join(strings.Fields(b.render(format)), " ")
+	return strings.Join(strings.Fields(b.Render(format)), " ")
 }
 
 // readTable reads the rows of a table, consuming it through its end tag.

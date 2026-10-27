@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"errors"
 	"strings"
-	"unicode"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -349,7 +348,7 @@ func inlineText(n *html.Node, sink ImageSink) string {
 				b.WriteString(wrap(text(c), "`"))
 			case c.DataAtom == atom.A:
 				label := inlineText(c, sink)
-				if href := Attr(c, "href"); href != "" && label != "" && !activeScheme(href) {
+				if href := Attr(c, "href"); href != "" && label != "" && !mdrender.ActiveScheme(href) {
 					b.WriteString("[" + label + "](" + href + ")")
 				} else {
 					b.WriteString(label)
@@ -402,25 +401,6 @@ func Attr(n *html.Node, name string) string {
 		}
 	}
 	return ""
-}
-
-// activeScheme reports whether href runs code or embeds a payload instead of
-// pointing at a document. Browsers ignore leading whitespace and control
-// characters and drop tabs and newlines inside the scheme, so both are removed
-// before matching.
-func activeScheme(href string) bool {
-	clean := strings.Map(func(r rune) rune {
-		if r <= ' ' || r == 0x7f {
-			return -1
-		}
-		return unicode.ToLower(r)
-	}, href)
-	for _, scheme := range []string{"javascript:", "vbscript:", "data:"} {
-		if strings.HasPrefix(clean, scheme) {
-			return true
-		}
-	}
-	return false
 }
 
 // Collapse joins the whitespace-separated fields of s with single spaces.
