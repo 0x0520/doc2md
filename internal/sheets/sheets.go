@@ -145,23 +145,25 @@ func xlsxSheetRows(f *excelize.File, name string, maxCells int) ([][]string, err
 	cur, filled, cells := 0, 0, 0
 	for it.Next() {
 		cur++
+		// A malformed row ends the sheet, but excelize reports it while returning the
+		// cells of the row before, which are kept.
 		cols, err := it.Columns()
-		if err != nil {
-			break
-		}
-		if len(cols) == 0 {
-			continue
-		}
 		// gap is the number of empty rows skipped since the last stored one; it keeps row
-		// positions and counts toward the cap, so a sparse sheet cannot allocate unbounded memory.
+		// positions and counts toward the cap, so a sparse sheet cannot allocate unbounded
+		// memory nor walk millions of empty rows.
 		gap := cur - filled - 1
 		if cells+gap+len(cols) > maxCells {
 			break
 		}
-		rows = append(rows, make([][]string, gap)...)
-		rows = append(rows, cols)
-		cells += gap + len(cols)
-		filled = cur
+		if len(cols) > 0 {
+			rows = append(rows, make([][]string, gap)...)
+			rows = append(rows, cols)
+			cells += gap + len(cols)
+			filled = cur
+		}
+		if err != nil {
+			break
+		}
 	}
 	return rows, nil
 }

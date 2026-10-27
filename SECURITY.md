@@ -7,4 +7,4 @@ Please report them privately through
 [GitHub security advisories](https://github.com/0x0520/doc2md/security/advisories/new)
 rather than in a public issue. You will get an answer within a week.
 
-Only the latest release is supported.
+Only the latest release is supported; until the first release, the head of `main`.

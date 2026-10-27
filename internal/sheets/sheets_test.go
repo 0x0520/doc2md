@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -106,6 +107,36 @@ func TestXLSX_ViaExcelize(t *testing.T) {
 	}
 	if !strings.Contains(md, "# Sheet1") || !strings.Contains(md, "| H1 | H2 |\n|---|---|\n| x | y |") {
 		t.Errorf("xlsx output unexpected:\n%s", md)
+	}
+}
+
+// A row number beyond the sheet limit made excelize's row iterator walk every
+// row up to it, for days (GO-2026-6685). Since the fix excelize stops with an
+// error there; the rows read before it must survive.
+func TestXLSX_RowNumberBeyondLimit(t *testing.T) {
+	f := excelize.NewFile()
+	defer f.Close()
+	f.Sheet.Delete("xl/worksheets/sheet1.xml")
+	f.Pkg.Store("xl/worksheets/sheet1.xml", fmt.Appendf(nil,
+		`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`+
+			`<row r="1"><c t="inlineStr"><is><t>kept</t></is></c></row><row r="%d"><c><v>2</v></c></row>`+
+			`</sheetData></worksheet>`, excelize.TotalRows+1))
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatalf("write xlsx: %v", err)
+	}
+	done := make(chan string, 1)
+	go func() {
+		md, _, _ := ToMarkdown("book.xlsx", buf.Bytes())
+		done <- md
+	}()
+	select {
+	case md := <-done:
+		if !strings.Contains(md, "kept") {
+			t.Errorf("row before the bad one lost:\n%s", md)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("conversion did not finish")
 	}
 }
 
