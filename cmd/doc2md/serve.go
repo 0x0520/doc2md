@@ -63,10 +63,14 @@ func listenAndServe(ctx context.Context, addr string, handler http.Handler) erro
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
-	// Only the header read is bounded here; request bodies are bounded by the handler's size limit.
+	// The timeouts keep slow clients from holding connections; the read timeout
+	// leaves room for a 32 MiB upload over a slow link.
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 	errc := make(chan error, 1)
 	go func() {
