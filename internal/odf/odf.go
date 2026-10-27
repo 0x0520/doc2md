@@ -254,6 +254,11 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 		if t.Name.Local == "spreadsheet" {
 			p.sheets = true
 		}
+	case "presentation":
+		// Speaker notes are not slide content; the PPTX reader leaves them out too.
+		if t.Name.Local == "notes" {
+			_ = dec.Skip()
+		}
 	case nsDrawing:
 		switch t.Name.Local {
 		// presentation:class="title" marks the slide's title placeholder.

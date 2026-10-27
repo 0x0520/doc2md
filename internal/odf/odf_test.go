@@ -281,3 +281,14 @@ func TestCellCapCountsEachCellOnce(t *testing.T) {
 		t.Errorf("kept %d rows, want %d", n, rows)
 	}
 }
+
+func TestSpeakerNotesDropped(t *testing.T) {
+	body := `<office:presentation><draw:page draw:name="p1">` +
+		`<draw:frame presentation:class="title"><draw:text-box><text:p>Slide title</text:p></draw:text-box></draw:frame>` +
+		`<presentation:notes><draw:frame><draw:text-box><text:p>Only for the speaker</text:p></draw:text-box></draw:frame></presentation:notes>` +
+		`</draw:page></office:presentation>`
+	got := md(t, slideType, body)
+	if !strings.Contains(got, "Slide title") || strings.Contains(got, "speaker") {
+		t.Errorf("got:\n%s", got)
+	}
+}
