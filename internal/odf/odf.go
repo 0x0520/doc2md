@@ -88,25 +88,50 @@ func attr(e xml.StartElement, space, local string) string {
 // paraStyle is the part of a paragraph style that matters here.
 type paraStyle struct{ display, parent, list string }
 
-// styles holds the paragraph styles and, per list style, which levels are numbered.
+// setting is a character property a style may set, clear or leave to its parent.
+type setting uint8
+
+const (
+	unset setting = iota
+	on
+	off
+)
+
+// textStyle is the emphasis a character style sets; unset properties come from its parent.
+type textStyle struct {
+	parent               string
+	bold, italic, strike setting
+}
+
+// styles holds the paragraph and character styles and, per list style, which
+// levels are numbered.
 type styles struct {
 	paras map[string]paraStyle
+	texts map[string]*textStyle
 	lists map[string]map[int]bool
 }
 
 func newStyles() *styles {
-	return &styles{paras: map[string]paraStyle{}, lists: map[string]map[int]bool{}}
+	return &styles{
+		paras: map[string]paraStyle{},
+		texts: map[string]*textStyle{},
+		lists: map[string]map[int]bool{},
+	}
 }
 
-// scan reads paragraph and list styles from styles.xml, or from the automatic
-// styles at the start of content.xml, where it stops at the document body.
+// scan reads paragraph, character and list styles from styles.xml, or from the
+// automatic styles at the start of content.xml, where it stops at the document body.
 func (s *styles) scan(data []byte) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	var cur map[int]bool
+	var text *textStyle // the character style being read
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			return
+		}
+		if e, ok := tok.(xml.EndElement); ok && ns(e.Name) == "style" && e.Name.Local == "style" {
+			text = nil
 		}
 		t, ok := tok.(xml.StartElement)
 		if !ok {
@@ -118,11 +143,25 @@ func (s *styles) scan(data []byte) {
 				return
 			}
 		case "style":
-			if t.Name.Local == "style" && attr(t, "style", "family") == "paragraph" {
-				s.paras[attr(t, "style", "name")] = paraStyle{
-					display: attr(t, "style", "display-name"),
-					parent:  attr(t, "style", "parent-style-name"),
-					list:    attr(t, "style", "list-style-name"),
+			switch t.Name.Local {
+			case "style":
+				switch attr(t, "style", "family") {
+				case "paragraph":
+					s.paras[attr(t, "style", "name")] = paraStyle{
+						display: attr(t, "style", "display-name"),
+						parent:  attr(t, "style", "parent-style-name"),
+						list:    attr(t, "style", "list-style-name"),
+					}
+				case "text":
+					text = &textStyle{parent: attr(t, "style", "parent-style-name")}
+					s.texts[attr(t, "style", "name")] = text
+				}
+			case "text-properties":
+				if text != nil {
+					// The fo: namespace URI does not have the shape ns() parses, so match any.
+					text.bold = weight(attr(t, "", "font-weight"))
+					text.italic = fontStyle(attr(t, "", "font-style"))
+					text.strike = lineThrough(attr(t, "style", "text-line-through-style"))
 				}
 			}
 		case "text":
@@ -138,6 +177,76 @@ func (s *styles) scan(data []byte) {
 			}
 		}
 	}
+}
+
+func weight(v string) setting {
+	switch v {
+	case "":
+		return unset
+	case "bold":
+		return on
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 700 {
+		return on
+	}
+	return off
+}
+
+func fontStyle(v string) setting {
+	switch v {
+	case "":
+		return unset
+	case "italic", "oblique":
+		return on
+	}
+	return off
+}
+
+func lineThrough(v string) setting {
+	switch v {
+	case "":
+		return unset
+	case "none":
+		return off
+	}
+	return on
+}
+
+// emphasis resolves the emphasis of a character style on top of base, the
+// emphasis of the surrounding text: the style's own settings win over its
+// parents', and what none sets is inherited. The chain is followed at most 10
+// steps to survive cycles.
+func (s *styles) emphasis(name string, base emphasis) emphasis {
+	var bold, italic, strike setting
+	for i := 0; name != "" && i < 10; i++ {
+		ts, ok := s.texts[name]
+		if !ok {
+			break
+		}
+		bold, italic, strike = first(bold, ts.bold), first(italic, ts.italic), first(strike, ts.strike)
+		name = ts.parent
+	}
+	return emphasis{
+		bold:   pick(bold, base.bold),
+		italic: pick(italic, base.italic),
+		strike: pick(strike, base.strike),
+	}
+}
+
+// first returns a unless it is unset.
+func first(a, b setting) setting {
+	if a != unset {
+		return a
+	}
+	return b
+}
+
+// pick applies a setting to an inherited value.
+func pick(s setting, inherited bool) bool {
+	if s == unset {
+		return inherited
+	}
+	return s == on
 }
 
 // isTitle reports whether a paragraph style is, or derives from, the built-in
@@ -280,15 +389,17 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 			if level < 1 {
 				level = 1
 			}
-			if txt := p.inline(dec); txt != "" {
+			if txt := p.inline(dec, false); txt != "" {
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: level, Text: txt})
 			}
 		case "p":
-			txt := p.inline(dec)
+			style := attr(t, "text", "style-name")
+			// Headings carry no emphasis; in a list a title style does not make a heading.
+			heading := len(p.lists) == 0 && (p.inTitleFrame() || p.st.isTitle(style))
+			txt := p.inline(dec, !heading)
 			if txt == "" {
 				return
 			}
-			style := attr(t, "text", "style-name")
 			switch {
 			case len(p.lists) > 0:
 				marker := "- "
@@ -364,12 +475,21 @@ func (p *parser) imageMarker(t xml.StartElement) string {
 	return p.picture(attr(t, "", "href"))
 }
 
+// textState is the formatting in force at a point of running text.
+type textState struct {
+	em   emphasis
+	link *link
+}
+
 // inline returns the text of the element just opened, consuming it through its
-// end tag, with a marker where an image stands. Space, tab, line-break and
-// nested paragraph elements become one space, since the result is a single
-// Markdown line.
-func (p *parser) inline(dec *xml.Decoder) string {
-	var b strings.Builder
+// end tag, with a marker where an image stands. Spans and links become
+// **bold**, _italic_, ~~strike~~ and [text](url) when format is set; links alone
+// otherwise. Space, tab, line-break and nested paragraph elements become one
+// space, since the result is a single Markdown line.
+func (p *parser) inline(dec *xml.Decoder, format bool) string {
+	var b inline
+	var cur textState
+	var stack []textState // the state outside each open element
 	depth := 1
 	open := len(p.frames)
 	for {
@@ -380,11 +500,18 @@ func (p *parser) inline(dec *xml.Decoder) string {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			depth++
+			stack = append(stack, cur)
 			switch ns(t.Name) {
 			case "text":
 				switch t.Name.Local {
 				case "s", "tab", "line-break", "p", "h":
-					b.WriteString(" ")
+					b.add(" ", cur.em, cur.link)
+				case "span":
+					cur.em = p.st.emphasis(attr(t, "text", "style-name"), cur.em)
+				case "a":
+					if url := linkTarget(attr(t, "", "href")); url != "" {
+						cur.link = &link{url}
+					}
 				}
 			case "table":
 				if t.Name.Local == "table" {
@@ -401,7 +528,7 @@ func (p *parser) inline(dec *xml.Decoder) string {
 						if p.inTable {
 							p.cellImages = append(p.cellImages, mk)
 						} else {
-							b.WriteString(" " + mk + " ")
+							b.add(" "+mk+" ", emphasis{}, cur.link)
 						}
 					}
 				}
@@ -411,14 +538,15 @@ func (p *parser) inline(dec *xml.Decoder) string {
 				p.frames = p.frames[:len(p.frames)-1]
 			}
 			if depth--; depth == 0 {
-				return strings.Join(strings.Fields(b.String()), " ")
+				return strings.Join(strings.Fields(b.render(format)), " ")
 			}
+			cur, stack = stack[len(stack)-1], stack[:len(stack)-1]
 		case xml.CharData:
-			b.Write(t)
+			b.add(string(t), cur.em, cur.link)
 		}
 	}
 	p.frames = p.frames[:open]
-	return strings.Join(strings.Fields(b.String()), " ")
+	return strings.Join(strings.Fields(b.render(format)), " ")
 }
 
 // readTable reads the rows of a table, consuming it through its end tag.
@@ -472,7 +600,7 @@ func (p *parser) readRow(dec *xml.Decoder) []string {
 		case xml.StartElement:
 			if ns(t.Name) == "table" && (t.Name.Local == "table-cell" || t.Name.Local == "covered-table-cell") {
 				rep := repeat(t, "number-columns-repeated")
-				txt := p.inline(dec)
+				txt := p.inline(dec, true)
 				if txt == "" {
 					col += rep
 					continue

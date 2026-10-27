@@ -32,7 +32,7 @@ func (p *parser) picture(s string, from int) int {
 	p.total += len(b)
 	p.seq++
 	p.images = append(p.images, docimg.Image{Seq: p.seq, Bytes: b, Ext: ext})
-	p.write(" " + docimg.MarkerFor(p.seq) + " ")
+	p.write(state{}, " "+docimg.MarkerFor(p.seq)+" ")
 	return end
 }
 

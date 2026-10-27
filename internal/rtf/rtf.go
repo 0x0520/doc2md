@@ -77,7 +77,9 @@ var orderedMarker = regexp.MustCompile(`^\(?[0-9A-Za-z]+[.)]`)
 // uc is the number of fallback characters after a \u escape, level the heading
 // level of the current paragraph (0 for body text) and title whether it is in the
 // Title style. ls and ilvl identify its list and nesting level, font the current
-// font (-1 before any). marker routes text to the list label.
+// font (-1 before any). marker routes text to the list label. em is the character
+// emphasis, base the emphasis of the paragraph style and link the hyperlink whose
+// result text is being written, if any.
 type state struct {
 	skip   bool
 	marker bool
@@ -87,6 +89,9 @@ type state struct {
 	ls     int
 	ilvl   int
 	font   int
+	em     emphasis
+	base   emphasis
+	link   *link
 }
 
 // parser accumulates blocks while walking the RTF source. Text goes to cell while
@@ -99,16 +104,18 @@ type parser struct {
 	defFont  int
 	blocks   []mdrender.Block
 	titles   []int
-	para     strings.Builder
+	para     inline
 	label    strings.Builder
 	row      []string
-	cell     strings.Builder
+	cell     inline
 	grid     [][]string
 	cells    int
 	inRow    bool
 	listItem bool
-	// tocField is set between a TOC field's instruction and its result.
-	tocField bool
+	// tocField is set between a TOC field's instruction and its result;
+	// fieldLink holds the target of a HYPERLINK field until its result.
+	tocField  bool
+	fieldLink *link
 
 	seq    int
 	total  int
@@ -238,7 +245,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 	case "par", "sect":
 		p.flushParagraph(*st)
 	case "pard":
-		st.level, st.title, st.ls, st.ilvl = 0, false, 0, 0
+		st.level, st.title, st.ls, st.ilvl, st.base = 0, false, 0, 0, emphasis{}
 	case "intbl", "trowd":
 		p.openRow(*st)
 	case "cell":
@@ -252,6 +259,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		}
 	case "s":
 		if hasArg {
+			st.base = p.styles.paras[arg]
 			if p.styles.titles[arg] {
 				st.title = true
 			} else if lvl, ok := p.styles.levels[arg]; ok {
@@ -273,16 +281,36 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 			return end
 		}
 	case "field":
-		p.tocField = false
+		p.tocField, p.fieldLink = false, nil
 	// A table of contents is generated text with page numbers. Its instruction
 	// is only readable here, so the result group that follows is dropped.
 	case "fldinst":
 		st.skip = true
-		p.tocField = isTOC(fieldCode(s, next))
+		code := fieldCode(s, next)
+		p.tocField = isTOC(code)
+		if url := hyperlinkTarget(code); url != "" {
+			p.fieldLink = &link{url}
+		}
 	case "fldrslt":
 		if p.tocField {
 			st.skip = true
 			p.tocField = false
+		}
+		st.link = p.fieldLink
+	// A switch with argument 0 turns the property off.
+	case "b":
+		st.em.bold = !hasArg || arg != 0
+	case "i":
+		st.em.italic = !hasArg || arg != 0
+	case "strike", "striked":
+		st.em.strike = !hasArg || arg != 0
+	case "plain":
+		st.em = emphasis{}
+	case "cs":
+		if cs, ok := p.styles.chars[arg]; ok && hasArg {
+			st.em.bold = st.em.bold || cs.bold
+			st.em.italic = st.em.italic || cs.italic
+			st.em.strike = st.em.strike || cs.strike
 		}
 	default:
 		switch {
@@ -318,16 +346,20 @@ func (p *parser) emit(st state, s string) {
 	case st.marker:
 		p.label.WriteString(s)
 	default:
-		p.write(s)
+		p.write(st, s)
 	}
 }
 
-func (p *parser) write(s string) {
+// write adds text to the open cell or paragraph. Word repeats the formatting of a
+// paragraph's style as direct formatting; emphasis the style itself carries is
+// dropped, as the DOCX reader drops it, so only the author's own marking remains.
+func (p *parser) write(st state, s string) {
+	em := emphasis{st.em.bold && !st.base.bold, st.em.italic && !st.base.italic, st.em.strike && !st.base.strike}
 	if p.inRow {
-		p.cell.WriteString(s)
+		p.cell.add(s, em, st.link)
 		return
 	}
-	p.para.WriteString(s)
+	p.para.add(s, em, st.link)
 }
 
 // openRow starts a table row, flushing any open paragraph so it stays outside the table.
@@ -344,8 +376,8 @@ func (p *parser) endCell() {
 	if !p.inRow {
 		return
 	}
-	p.row = append(p.row, squeeze(p.cell.String()))
-	p.cell.Reset()
+	p.row = append(p.row, squeeze(p.cell.render(true)))
+	p.cell.reset()
 	// A list label inside a cell belongs to the cell, not to the next paragraph.
 	p.listItem = false
 	p.label.Reset()
@@ -355,9 +387,9 @@ func (p *parser) endCell() {
 }
 
 func (p *parser) endRow() {
-	if p.cell.Len() > 0 {
-		p.row = append(p.row, squeeze(p.cell.String()))
-		p.cell.Reset()
+	if !p.cell.empty() {
+		p.row = append(p.row, squeeze(p.cell.render(true)))
+		p.cell.reset()
 	}
 	if len(p.row) > 0 {
 		p.grid = append(p.grid, p.row)
@@ -386,11 +418,11 @@ func (p *parser) flushParagraph(st state) {
 	p.listItem = false
 	p.label.Reset()
 	if p.inRow {
-		p.cell.WriteString(" ")
+		p.cell.add(" ", emphasis{}, nil)
 		return
 	}
-	txt := squeeze(p.para.String())
-	p.para.Reset()
+	txt := squeeze(p.para.render(!st.title && st.level == 0))
+	p.para.reset()
 	if txt == "" {
 		return
 	}
@@ -487,21 +519,45 @@ func skipUnits(s string, i, n int) int {
 func isAlpha(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// fieldCode returns the start of the instruction text of the field whose \fldinst
-// destination content begins at s[from].
+// maxFieldCode bounds the instruction text read from a field.
+const maxFieldCode = 4096
+
+// fieldCode returns the instruction text of the field whose \fldinst destination
+// content begins at s[from], without control words and without ignorable groups
+// such as the binary \datafield Word adds to hyperlinks.
 func fieldCode(s string, from int) string {
 	var b strings.Builder
 	depth := 1
-	for i := from; i < len(s) && depth > 0 && b.Len() < 8; {
+	for i := from; i < len(s) && depth > 0 && b.Len() < maxFieldCode; {
 		switch s[i] {
 		case '{':
+			if strings.HasPrefix(s[i+1:], `\*`) {
+				g, ok := group(s, i)
+				if !ok {
+					return strings.TrimSpace(b.String())
+				}
+				i += len(g) + 2
+				continue
+			}
 			depth++
 			i++
 		case '}':
 			depth--
 			i++
 		case '\\':
-			_, _, _, i = control(s, i)
+			var word string
+			word, _, _, i = control(s, i)
+			switch word {
+			case `\`, "{", "}":
+				b.WriteString(word)
+			case "'":
+				if i+2 <= len(s) {
+					if v, err := strconv.ParseUint(s[i:i+2], 16, 8); err == nil {
+						b.WriteRune(charmap.Windows1252.DecodeByte(byte(v)))
+					}
+					i += 2
+				}
+			}
 		case '\r', '\n':
 			i++
 		default:
@@ -520,14 +576,18 @@ func isTOC(code string) bool {
 
 // stylesheet holds what the paragraph styles say about headings: the heading
 // level of styles with an \outlinelevel and the numbers of styles named Title.
+// chars and paras hold the emphasis of the character (\csN) and paragraph (\sN)
+// styles; their \sbasedon chain is not followed.
 type stylesheet struct {
 	levels map[int]int
 	titles map[int]bool
+	chars  map[int]emphasis
+	paras  map[int]emphasis
 }
 
-// parseStylesheet reads the paragraph styles (\sN) from the stylesheet.
+// parseStylesheet reads the paragraph (\sN) and character (\csN) styles from the stylesheet.
 func parseStylesheet(s string) stylesheet {
-	out := stylesheet{levels: map[int]int{}, titles: map[int]bool{}}
+	out := stylesheet{levels: map[int]int{}, titles: map[int]bool{}, chars: map[int]emphasis{}, paras: map[int]emphasis{}}
 	start := strings.Index(s, `{\stylesheet`)
 	if start < 0 {
 		return out
@@ -538,17 +598,31 @@ func parseStylesheet(s string) stylesheet {
 	}
 	eachGroup(body, func(entry string) {
 		num, lvl, isPara := 0, -1, false
+		csNum, cs, isChar := 0, emphasis{}, false
 		topWords(entry, func(word string, arg int, hasArg bool) {
+			on := !hasArg || arg != 0
 			switch {
+			case word == "cs" && hasArg:
+				csNum, isChar = arg, true
+			case word == "b":
+				cs.bold = on
+			case word == "i":
+				cs.italic = on
+			case word == "strike" || word == "striked":
+				cs.strike = on
 			case word == "s" && hasArg:
 				num, isPara = arg, true
 			case word == "outlinelevel" && hasArg && arg >= 0 && arg <= 8:
 				lvl = arg + 1
 			}
 		})
+		if isChar {
+			out.chars[csNum] = cs
+		}
 		if !isPara {
 			return
 		}
+		out.paras[num] = cs
 		// Word writes the built-in name even in localised documents; "Titel" is
 		// kept for other producers, as in the OpenDocument reader.
 		if name := strings.ToLower(styleName(entry)); name == "title" || name == "titel" {
