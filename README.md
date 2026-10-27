@@ -10,6 +10,20 @@ process, no JRE, no Python, no cgo: bytes in, Markdown out.
 doc2md is built for feeding documents to LLMs, search indexes and diff tools,
 where headings, tables and reading order matter more than visual fidelity.
 
+## How this project is built
+
+doc2md is developed with [Claude](https://www.anthropic.com/claude), Anthropic's AI
+model, under the maintainer's supervision. Claude writes much of the code, tests and
+documentation; the maintainer sets the direction, reviews every change and decides
+what is merged. Throughout development the converter has been tested extensively
+by hand against a large and varied set of real-world documents. Commits with AI
+involvement carry a `Co-Authored-By: Claude` trailer.
+
+On top of that, every behaviour is covered by tests, PDF layout by golden files,
+all readers are fuzzed against malformed input, and conversions are checked against
+documents produced by the real Office applications (`tools/officefixtures`). If you
+find a bug, please report it like any other.
+
 ## Formats
 
 | Format | Package | What is kept |
@@ -169,20 +183,6 @@ real PDF with pdfcpu at test time and compare the Markdown with
 Review golden diffs as part of every change.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## How this project is built
-
-doc2md is developed with [Claude](https://www.anthropic.com/claude), Anthropic's AI
-model, as a coding assistant. Much of the code, tests and documentation is written
-by Claude under the maintainer's supervision: the maintainer sets the direction,
-reviews the changes and decides what is merged. Commits with AI involvement carry a
-`Co-Authored-By: Claude` trailer.
-
-The safeguards do not depend on who wrote a change: every behaviour is covered by
-tests, PDF layout by golden files, all readers are fuzzed against malformed input,
-and conversions are checked against documents produced by the real Office
-applications (`tools/officefixtures`). If you find a bug, please report it like any
-other.
 
 ## License
 
