@@ -2,6 +2,8 @@ module github.com/0x0520/doc2md
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/pdfcpu/pdfcpu v0.16.3
