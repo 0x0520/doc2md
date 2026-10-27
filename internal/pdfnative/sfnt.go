@@ -2,6 +2,7 @@ package pdfnative
 
 import "unicode"
 
+// u16 and u32 read big-endian values; out-of-range reads return 0, so corrupt fonts degrade instead of panicking.
 func u16(b []byte, o int) int {
 	if o < 0 || o+2 > len(b) {
 		return 0
@@ -16,6 +17,7 @@ func u32(b []byte, o int) int {
 	return int(b[o])<<24 | int(b[o+1])<<16 | int(b[o+2])<<8 | int(b[o+3])
 }
 
+// sfntTables returns the tables of a TrueType/OpenType font by tag. TrueType collections are not supported.
 func sfntTables(b []byte) map[string][]byte {
 	out := map[string][]byte{}
 	if len(b) < 12 {
@@ -44,6 +46,8 @@ func sfntTables(b []byte) map[string][]byte {
 	return out
 }
 
+// cmapGIDToUnicode inverts the best Unicode cmap subtable (formats 0, 4, 6 and 12)
+// into glyph id to rune. When several characters map to a glyph, the first wins.
 func cmapGIDToUnicode(cmap []byte) map[int]rune {
 	out := map[int]rune{}
 	n := u16(cmap, 2)
@@ -54,6 +58,7 @@ func cmapGIDToUnicode(cmap []byte) map[int]rune {
 			break
 		}
 		plat, enc, off := u16(cmap, rec), u16(cmap, rec+2), u32(cmap, rec+4)
+		// Preference: full Unicode (3,10), BMP (3,1), platform 0, then symbol (3,0).
 		score := 1
 		switch {
 		case plat == 3 && enc == 10:
@@ -92,6 +97,7 @@ func cmapGIDToUnicode(cmap []byte) map[int]rune {
 			put(first+i, u16(sub, 10+i*2))
 		}
 	case 4:
+		// Format 4: parallel arrays of segment ends, starts, deltas and range offsets.
 		seg := u16(sub, 6) / 2
 		endO := 14
 		startO := endO + seg*2 + 2
@@ -118,6 +124,7 @@ func cmapGIDToUnicode(cmap []byte) map[int]rune {
 		for gi := 0; gi < ng; gi++ {
 			base := 16 + gi*12
 			sc, ec, sg := u32(sub, base), u32(sub, base+4), u32(sub, base+8)
+			// Skip a corrupt group.
 			if sc > ec || ec-sc > 1<<20 {
 				continue
 			}
@@ -129,6 +136,7 @@ func cmapGIDToUnicode(cmap []byte) map[int]rune {
 	return out
 }
 
+// coverageGlyphs expands a GSUB Coverage table (formats 1 and 2) into glyph ids ordered by coverage index.
 func coverageGlyphs(cov []byte) []int {
 	switch u16(cov, 0) {
 	case 1:
@@ -170,6 +178,9 @@ func coverageGlyphs(cov []byte) []int {
 	return nil
 }
 
+// gsubLigatures collects ligature substitutions (lookup type 4, or type 7 wrapping it)
+// from a GSUB table as ligature glyph to component glyphs. Scripts and features are
+// ignored: any ligature glyph in the font can appear in the text.
 func gsubLigatures(gsub []byte) map[int][]int {
 	out := map[int][]int{}
 	llOff := u16(gsub, 8)
@@ -207,6 +218,7 @@ func gsubLigatures(gsub []byte) map[int][]int {
 	return out
 }
 
+// parseLigSubst reads a LigatureSubstFormat1 subtable into out.
 func parseLigSubst(sub []byte, out map[int][]int) {
 	if u16(sub, 0) != 1 {
 		return
@@ -230,6 +242,7 @@ func parseLigSubst(sub []byte, out map[int][]int) {
 			lig := ls[ligOff:]
 			ligGID := u16(lig, 0)
 			compCount := u16(lig, 2)
+			// Implausible component counts mean a corrupt table.
 			if compCount < 2 || compCount > 8 {
 				continue
 			}
@@ -245,6 +258,8 @@ func parseLigSubst(sub []byte, out map[int][]int) {
 	}
 }
 
+// embeddedLigatures returns glyph id to text ("fi", "ffl") for the ligature glyphs of
+// an embedded font whose components are all letters. It returns nil on corrupt fonts.
 func embeddedLigatures(prog []byte) map[int]string {
 	defer func() { _ = recover() }()
 	tabs := sfntTables(prog)

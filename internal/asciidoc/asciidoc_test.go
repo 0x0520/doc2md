@@ -80,6 +80,7 @@ func TestToMarkdown_ColSpan(t *testing.T) {
 	}
 }
 
+// A row-span specifier before the first cell (".2+|CR") repeats that cell on the next row.
 func TestToMarkdown_SpecLedRow(t *testing.T) {
 	in := "|===\n|Group |Code |Value\n.2+|CR |010 |0.38 %\n|020 |0.42 %\n|==="
 	want := "| Group | Code | Value |\n|---|---|---|\n| CR | 010 | 0.38 % |\n| CR | 020 | 0.42 % |"
@@ -111,6 +112,7 @@ func TestToMarkdown_ColsAttributeSetsWidth(t *testing.T) {
 	}
 }
 
+// One-character cells such as "a" or "2" look like style or count specifiers but are text.
 func TestToMarkdown_ShortCellIsNotASpec(t *testing.T) {
 	in := "|===\n|Code |Meaning\n|a |Fixed item\n|2 |Two\n|==="
 	want := "| Code | Meaning |\n|---|---|\n| a | Fixed item |\n| 2 | Two |"
@@ -119,6 +121,7 @@ func TestToMarkdown_ShortCellIsNotASpec(t *testing.T) {
 	}
 }
 
+// "{plus}" expands to "+"; the result must not then be mistaken for a span specifier.
 func TestToMarkdown_AttributeValueIsNotASpan(t *testing.T) {
 	in := "|===\n|Code |Range\n|02{plus} |from two\n|03{plus} |from three\n|==="
 	want := "| Code | Range |\n|---|---|\n| 02+ | from two |\n| 03+ | from three |"
@@ -215,6 +218,7 @@ func TestToMarkdown_Lists(t *testing.T) {
 	}
 }
 
+// Without a closing delimiter the table runs to the end of the input.
 func TestToMarkdown_UnclosedTable(t *testing.T) {
 	got := md(t, "|===\n|A |B\n|1 |2")
 	want := "| A | B |\n|---|---|\n| 1 | 2 |"

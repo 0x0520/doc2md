@@ -6,6 +6,10 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
+// extractTokens interprets a page's content stream and returns one token per
+// character code, positioned in page space, plus the image draws. It tracks the
+// text state itself so that font widths, ToUnicode maps and embedded-font
+// ligatures can be applied.
 func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 	contents := p.V.Key("Contents")
 	if contents.Kind() == pdf.Null {
@@ -20,11 +24,13 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 	var out []pdf.Text
 	var places []imgPlace
 
+	// showText emits a token per character code and advances the text matrix.
 	showText := func(raw string) {
 		if g.metrics == nil {
 			return
 		}
 		step := 1
+		// Type0 fonts are read as two-byte codes.
 		if g.metrics.type0 {
 			step = 2
 		}
@@ -43,6 +49,7 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 			txt = expandLigatures(txt)
 			w0 := g.metrics.width(code, txt)
 
+			// Text rendering matrix (PDF 32000-1 §9.4.4): gives device-space position and size.
 			trm := textScale(g.tfs, g.th, g.trise).mul(g.tm).mul(g.ctm)
 			out = append(out, pdf.Text{
 				Font:     g.baseFont,
@@ -54,9 +61,11 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 			})
 
 			tx := w0 / 1000 * g.tfs
+			// Word spacing applies only to the single-byte code 32.
 			if step == 1 && code == 32 {
 				tx += g.tw
 			}
+			// Horizontal advance per PDF 32000-1 §9.4.4: ((w0·Tfs + Tc + Tw) · Th).
 			tx = (tx + g.tc) * g.th
 			g.tm = translateM(tx, 0).mul(g.tm)
 		}
@@ -169,10 +178,12 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 						showText(x.RawString())
 						continue
 					}
+					// A TJ number is thousandths of text space, subtracted from the advance.
 					tx := -x.Float64() / 1000 * g.tfs * g.th
 					g.tm = translateM(tx, 0).mul(g.tm)
 				}
 			}
+		// Only the position of the image is kept; form XObjects are not entered.
 		case "Do":
 			if len(args) == 1 {
 				places = append(places, imgPlace{
@@ -186,12 +197,16 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 	return out, places
 }
 
+// imgPlace is an image draw: the XObject name, its top edge and height in page space.
 type imgPlace struct {
 	name   string
 	topY   float64
 	height float64
 }
 
+// gstate is the part of the graphics and text state that affects glyph placement:
+// font size tfs, character spacing tc, word spacing tw, horizontal scale th
+// (1 = 100%), leading tl.
 type gstate struct {
 	ctm, tm, tlm        matrix3
 	tf                  pdf.Font
@@ -202,6 +217,7 @@ type gstate struct {
 	trise               float64
 }
 
+// stripSubsetPrefix removes the "ABCDEF+" subset tag from a font name.
 func stripSubsetPrefix(name string) string {
 	if i := strings.Index(name, "+"); i >= 0 {
 		return name[i+1:]
@@ -209,12 +225,14 @@ func stripSubsetPrefix(name string) string {
 	return name
 }
 
+// ligatures expands presentation-form ligature code points to plain letters.
 var ligatures = strings.NewReplacer(
 	"ﬀ", "ff", "ﬁ", "fi", "ﬂ", "fl",
 	"ﬃ", "ffi", "ﬄ", "ffl", "ﬅ", "ft", "ﬆ", "st",
 )
 
 func expandLigatures(s string) string {
+	// Pure ASCII, the common case, skips the replacer.
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
 			return ligatures.Replace(s)
@@ -223,6 +241,7 @@ func expandLigatures(s string) string {
 	return s
 }
 
+// matrix3 is a PDF transformation matrix in row-vector form; a.mul(b) applies a first, then b.
 type matrix3 [3][3]float64
 
 var identM = matrix3{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}
@@ -241,6 +260,7 @@ func translateM(tx, ty float64) matrix3 {
 	return matrix3{{1, 0, 0}, {0, 1, 0}, {tx, ty, 1}}
 }
 
+// textScale is the font size, horizontal scaling and rise matrix of PDF 32000-1 §9.4.4.
 func textScale(tfs, th, trise float64) matrix3 {
 	return matrix3{{tfs * th, 0, 0}, {0, tfs, 0}, {0, trise, 1}}
 }

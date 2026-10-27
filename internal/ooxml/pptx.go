@@ -16,14 +16,21 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// ErrNotPptx is returned (wrapped) when the input is not a readable .pptx.
 var ErrNotPptx = errors.New("not a readable .pptx (OOXML) presentation")
 
+// slideName matches slide parts; the number is the part number, not necessarily the
+// presentation position.
 var slideName = regexp.MustCompile(`^ppt/slides/slide(\d+)\.xml$`)
 
+// slideRelsName matches the relationship parts that resolve a slide's picture ids.
 var slideRelsName = regexp.MustCompile(`^ppt/slides/_rels/slide(\d+)\.xml\.rels$`)
 
+// maxSlideParts bounds how many slide parts are read from one archive.
 const maxSlideParts = 10_000
 
+// PptxToMarkdown converts a .pptx or .pptm to Markdown: slide titles become
+// headings, followed by the slide's text, tables and picture markers.
 func PptxToMarkdown(data []byte) (string, []docimg.Image, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -45,6 +52,7 @@ func PptxToMarkdown(data []byte) (string, []docimg.Image, error) {
 	if len(refs) == 0 {
 		return "", nil, ErrNotPptx
 	}
+	// Zip entry order is arbitrary, so slides are ordered by part number.
 	sort.Slice(refs, func(i, j int) bool { return refs[i].n < refs[j].n })
 	if len(refs) > maxSlideParts {
 		refs = refs[:maxSlideParts]
@@ -68,6 +76,7 @@ func PptxToMarkdown(data []byte) (string, []docimg.Image, error) {
 	var blocks []mdrender.Block
 	var total int64
 	for _, r := range refs {
+		// Cap the cumulative size of slide XML read from one archive.
 		if total >= zipx.MaxTotalSize {
 			break
 		}
@@ -84,6 +93,8 @@ func PptxToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return mdrender.Document(blocks), med.images, nil
 }
 
+// parseSlide extracts the blocks of one slide in document order. embeds maps the
+// slide's relationship ids to image parts.
 func parseSlide(b []byte, med *media, embeds map[string]string, slideNum int) []mdrender.Block {
 	dec := xml.NewDecoder(bytes.NewReader(b))
 	var blocks []mdrender.Block
@@ -97,6 +108,7 @@ func parseSlide(b []byte, med *media, embeds map[string]string, slideNum int) []
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "ph":
+				// Paragraphs in a title placeholder become headings; the flag is cleared at </sp>.
 				if typ := attr(t, "type"); typ == "title" || typ == "ctrTitle" {
 					titleShape = true
 				}
@@ -128,6 +140,7 @@ func parseSlide(b []byte, med *media, embeds map[string]string, slideNum int) []
 	return blocks
 }
 
+// paraText returns the text of an a:p paragraph, with line breaks as spaces.
 func paraText(dec *xml.Decoder) string {
 	var sb bytes.Buffer
 	depth := 1

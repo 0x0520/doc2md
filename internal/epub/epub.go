@@ -1,3 +1,6 @@
+// Package epub converts an EPUB book to Markdown. Chapters are read in the
+// package's spine order (zip order is unspecified) and rendered by the htmldoc
+// package, since EPUB content documents are XHTML.
 package epub
 
 import (
@@ -14,16 +17,21 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// ErrNotEpub is returned when the input is not a readable EPUB: bad zip, no
+// container.xml or package document, or an empty spine.
 var ErrNotEpub = errors.New("not a readable EPUB book")
 
+// maxDocuments caps the number of spine entries rendered.
 const maxDocuments = 5000
 
+// container is META-INF/container.xml, which only names the package document.
 type container struct {
 	Rootfiles []struct {
 		FullPath string `xml:"full-path,attr"`
 	} `xml:"rootfiles>rootfile"`
 }
 
+// pkg is the package document (OPF): title, manifest and spine.
 type pkg struct {
 	Title    string `xml:"metadata>title"`
 	Manifest []struct {
@@ -38,6 +46,7 @@ type pkg struct {
 	} `xml:"spine>itemref"`
 }
 
+// navPoint is one entry of an EPUB 2 toc.ncx; nesting is the hierarchy.
 type navPoint struct {
 	Content struct {
 		Src string `xml:"src,attr"`
@@ -49,6 +58,8 @@ type ncx struct {
 	Points []navPoint `xml:"navMap>navPoint"`
 }
 
+// ToMarkdown converts EPUB bytes to Markdown in spine order and returns the
+// images found in the package.
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -71,6 +82,7 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 		return "", nil, fmt.Errorf("%w: %v", ErrNotEpub, err)
 	}
 
+	// Manifest hrefs are relative to the package document, not the archive root.
 	base := path.Dir(opfPath)
 	href := make(map[string]string, len(p.Manifest))
 	for _, it := range p.Manifest {
@@ -79,8 +91,11 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 		}
 	}
 
+	// Chapters do not state how they nest; the navigation document does. Without
+	// one, every chapter stays at top level.
 	depth := navDepths(zr, base, p)
 
+	// One sink for the whole book, so image numbers run across chapters.
 	sink := &packageSink{zr: zr}
 
 	var parts []string
@@ -89,6 +104,7 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 		if len(parts) >= maxDocuments || total >= zipx.MaxTotalSize {
 			break
 		}
+		// linear="no" items (covers, ad pages) are kept; only their position is not guaranteed.
 		name := href[ref.IDRef]
 		if name == "" {
 			continue
@@ -102,6 +118,7 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 			continue
 		}
 		total += int64(len(b))
+		// Image paths in a chapter are relative to the chapter's own directory.
 		sink.base = path.Dir(name)
 		md, cerr := htmldoc.ToMarkdownWith(b, sink)
 		if cerr != nil || strings.TrimSpace(md) == "" {
@@ -112,12 +129,15 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	if len(parts) == 0 {
 		return "", nil, ErrNotEpub
 	}
+	// The book title lives only in the metadata; add it unless the first chapter
+	// already opens with it (title pages).
 	if t := strings.TrimSpace(p.Title); t != "" && !opensWith(parts[0], t) {
 		parts = append([]string{"# " + t}, parts...)
 	}
 	return strings.Join(parts, "\n\n") + "\n", sink.images, nil
 }
 
+// opensWith reports whether the chapter's first line is a heading equal to title.
 func opensWith(chapter, title string) bool {
 	for line := range strings.SplitSeq(chapter, "\n") {
 		line = strings.TrimSpace(line)
@@ -135,6 +155,7 @@ func opensWith(chapter, title string) bool {
 
 func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// packagePath returns the package document's path from container.xml.
 func packagePath(zr *zip.Reader) (string, error) {
 	f := zipx.Find(zr, "META-INF/container.xml")
 	if f == nil {
@@ -156,6 +177,8 @@ func packagePath(zr *zip.Reader) (string, error) {
 	return "", fmt.Errorf("%w: container.xml names no package document", ErrNotEpub)
 }
 
+// resolve turns a manifest href into a zip entry name: fragment and query are
+// removed and no leading slash is kept.
 func resolve(base, href string) string {
 	if i := strings.IndexAny(href, "#?"); i >= 0 {
 		href = href[:i]
@@ -166,8 +189,11 @@ func resolve(base, href string) string {
 	return strings.TrimPrefix(path.Clean(path.Join(base, href)), "/")
 }
 
+// maxImageBytes caps the total image payload of one book; single entries are bounded by zipx.
 const maxImageBytes = 128 << 20
 
+// packageSink resolves chapter <img> sources to image entries in the archive.
+// base is set per chapter; one sink serves the whole book so numbering is continuous.
 type packageSink struct {
 	zr     *zip.Reader
 	base   string
@@ -176,10 +202,13 @@ type packageSink struct {
 	images []docimg.Image
 }
 
+// Marker implements htmldoc.ImageSink. Anything it cannot resolve (web URLs,
+// missing entries, unknown formats) yields "" so the alt text is used instead.
 func (s *packageSink) Marker(src string) string {
 	if src == "" || s.total >= maxImageBytes {
 		return ""
 	}
+	// Any scheme (http:, data:) points outside the package.
 	if i := strings.IndexByte(src, ':'); i > 0 && !strings.HasPrefix(src, "//") {
 		return ""
 	}

@@ -63,6 +63,7 @@ line</Data></Cell>
 	}
 }
 
+// Crafted Index and MergeAcross values must not allocate millions of columns.
 func TestSpreadsheetML_HostileIndexBounded(t *testing.T) {
 	xml := `<?xml version="1.0"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
@@ -132,6 +133,7 @@ func xlsxFixture(t *testing.T, build func(*excelize.File)) (*excelize.File, []by
 	return f, data
 }
 
+// Rows that only carry formatting (here A3:A5000) are not read as data rows.
 func TestXLSX_FormattedEmptyRowsAreNotMaterialised(t *testing.T) {
 	f, data := xlsxFixture(t, func(f *excelize.File) {
 		f.SetCellValue("Sheet1", "A1", "H1")
@@ -199,6 +201,7 @@ func TestXLSX_CapStopsReading(t *testing.T) {
 	}
 }
 
+// Skipped empty rows count toward the cell cap, so a distant cell cannot defeat it.
 func TestXLSX_GapRowsCountAgainstCap(t *testing.T) {
 	f, _ := xlsxFixture(t, func(f *excelize.File) {
 		f.SetCellValue("Sheet1", "A1", "top")

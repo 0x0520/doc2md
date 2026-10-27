@@ -90,6 +90,7 @@ func TestToMarkdown_Docx(t *testing.T) {
 	}
 }
 
+// A crafted list level must not turn into an unbounded indent.
 func TestToMarkdown_HostileIlvlBounded(t *testing.T) {
 	doc := `<?xml version="1.0"?>
 <w:document ` + nsW + `><w:body>
@@ -177,6 +178,7 @@ func TestSizeFallback_StylesWin(t *testing.T) {
 	}
 }
 
+// A few large lines among little body text are formatting, not an outline.
 func TestSizeFallback_NotAnOutline(t *testing.T) {
 	body := plain("Short body text.") +
 		sized(32, "Line one") + sized(32, "Line two") + sized(32, "Line three")
@@ -189,6 +191,7 @@ func TestSizeFallback_NotAnOutline(t *testing.T) {
 	}
 }
 
+// When half the paragraphs are larger than the rest, size is no heading signal.
 func TestSizeFallback_HalfAndHalf(t *testing.T) {
 	body := plain("First line.") + plain("Second line.") + plain("Third line.") +
 		sized(32, "Fourth line") + sized(32, "Fifth line") + sized(32, "Sixth line")

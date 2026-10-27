@@ -8,8 +8,10 @@ import (
 	"strings"
 )
 
+// maxCols is Excel's column limit; it bounds sparse Index and MergeAcross values.
 const maxCols = 16384
 
+// isSpreadsheetML reports whether data looks like Excel 2003 XML rather than BIFF.
 func isSpreadsheetML(data []byte) bool {
 	head := data
 	if len(head) > 512 {
@@ -20,6 +22,7 @@ func isSpreadsheetML(data []byte) bool {
 		bytes.Contains(head, []byte("urn:schemas-microsoft-com:office:spreadsheet"))
 }
 
+// boldStyles returns the ids of styles with a bold font, used to find section-title rows.
 func boldStyles(data []byte) map[string]bool {
 	var wb struct {
 		Styles struct {
@@ -43,6 +46,8 @@ func boldStyles(data []byte) map[string]bool {
 	return bold
 }
 
+// spreadsheetMLToMarkdown reads Excel 2003 XML. The cell Index attribute is
+// 1-based and lets a row skip columns; MergeAcross widens a cell over following columns.
 func spreadsheetMLToMarkdown(data []byte) (string, error) {
 	bold := boldStyles(data)
 
@@ -110,6 +115,7 @@ func spreadsheetMLToMarkdown(data []byte) (string, error) {
 				col += span + 1
 			}
 			cells += len(row)
+			// A row with a single bold value is a section title: it splits the table and becomes a heading.
 			if nonEmpty == 1 && bold[lastStyle] {
 				breaks[len(rows)] = lastValue
 			}

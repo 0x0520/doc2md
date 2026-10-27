@@ -10,8 +10,11 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// maxImageBytes caps the total image data extracted from one document.
 const maxImageBytes = 128 << 20
 
+// media extracts images from a package's media/ parts on demand and numbers them
+// in reading order.
 type media struct {
 	files  map[string]*zip.File
 	seq    int
@@ -29,6 +32,8 @@ func newMedia(zr *zip.Reader) *media {
 	return m
 }
 
+// marker extracts the image at part and returns its "[Image: N]" marker, or "" if
+// it is skipped (unknown type, size cap reached, unreadable or empty).
 func (m *media) marker(part string, page int) string {
 	f := m.files[part]
 	if f == nil {
@@ -51,6 +56,8 @@ func (m *media) marker(part string, page int) string {
 	return docimg.MarkerFor(m.seq)
 }
 
+// relTargets resolves internal relationship targets to package paths. Relative
+// targets are taken from baseDir; a leading "/" means package-absolute.
 func relTargets(b []byte, baseDir string) map[string]string {
 	out := map[string]string{}
 	if len(b) == 0 {
@@ -80,6 +87,8 @@ func relTargets(b []byte, baseDir string) map[string]string {
 	return out
 }
 
+// embedID reads up to the closing tag and returns the relationship id of the first
+// image: DrawingML a:blip (r:embed) or legacy VML v:imagedata (r:id).
 func embedID(dec *xml.Decoder, closing string) string {
 	id := ""
 	depth := 1

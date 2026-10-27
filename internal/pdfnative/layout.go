@@ -8,6 +8,9 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
+// line is one reconstructed text line with the geometry and font signals the later passes need.
+// y is the baseline (larger is higher on the page), xStart the left edge, pre marks
+// a finished Markdown table.
 type line struct {
 	text     string
 	y        float64
@@ -18,6 +21,8 @@ type line struct {
 	pre      bool
 }
 
+// page carries one source page through the pipeline: raw token rows, then
+// assembled lines. num is the 1-based page number, kept even after a cover is dropped.
 type page struct {
 	rows   [][]pdf.Text
 	lines  []line
@@ -26,8 +31,12 @@ type page struct {
 	places []imgPlace
 }
 
+// minGlyphSize drops invisible text at or below this size (points).
 const minGlyphSize = 1.0
 
+// sameLine reports whether two tokens share a baseline: the score
+// 1 - 2·|ΔY|/size - 0.033·|ΔSize|/size must reach 0.75, which for equal sizes means
+// |ΔY| <= 0.125·size. Word spacing is not considered here.
 func sameLine(a, b pdf.Text) bool {
 	maxFS := maxF(a.FontSize, b.FontSize)
 	if maxFS == 0 {
@@ -45,6 +54,9 @@ func absF(v float64) float64 {
 	return v
 }
 
+// pageRows groups tokens into baseline rows, top to bottom and left to right. It stops
+// before table assembly so running heads and footers can be removed from the rows
+// first. Whitespace tokens are kept: many PDFs draw word spaces as real glyphs.
 func pageRows(tokens []pdf.Text) [][]pdf.Text {
 	toks := make([]pdf.Text, 0, len(tokens))
 	for _, t := range tokens {
@@ -78,6 +90,7 @@ func pageRows(tokens []pdf.Text) [][]pdf.Text {
 
 func rowText(row []pdf.Text) string { return joinLine(row).text }
 
+// rowBaseline is the baseline of the row's first token.
 func rowBaseline(row []pdf.Text) float64 {
 	if len(row) == 0 {
 		return 0
@@ -85,6 +98,8 @@ func rowBaseline(row []pdf.Text) float64 {
 	return row[0].Y
 }
 
+// joinLine joins a row's tokens into one line, inserting a space where the gap exceeds
+// 0.2 font sizes. It sorts toks by X in place.
 func joinLine(toks []pdf.Text) line {
 	sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
 
@@ -95,6 +110,8 @@ func joinLine(toks []pdf.Text) line {
 	if len(toks) > 0 {
 		span = toks[len(toks)-1].X - toks[0].X
 	}
+	// Reported widths are trusted only when they cover a fair part of the row's extent;
+	// broken width tables would otherwise make every gap look like a space.
 	wReliable := span > 0 && sumW > 0.4*span
 
 	var b strings.Builder
@@ -128,6 +145,7 @@ func joinLine(toks []pdf.Text) line {
 	}
 }
 
+// dominantSize returns the font size (to 0.5 pt) carrying the most characters.
 func dominantSize(toks []pdf.Text) float64 {
 	weight := map[float64]int{}
 	for _, t := range toks {
@@ -139,6 +157,7 @@ func dominantSize(toks []pdf.Text) float64 {
 	return modeByWeight(weight)
 }
 
+// dominantBold reports whether at least half of the characters are in a bold face.
 func dominantBold(toks []pdf.Text) bool {
 	var bold, total int
 	for _, t := range toks {
@@ -154,11 +173,13 @@ func dominantBold(toks []pdf.Text) bool {
 	return total > 0 && bold*2 >= total
 }
 
+// isBoldFont guesses boldness from the font name.
 func isBoldFont(font string) bool {
 	f := strings.ToLower(font)
 	return strings.Contains(f, "bold") || strings.Contains(f, "black") || strings.Contains(f, "heavy") || strings.Contains(f, "semibold")
 }
 
+// bodyFontSize returns the size carrying the most text outside tables, 12 for an empty document.
 func bodyFontSize(pages []page) float64 {
 	weight := map[float64]int{}
 	for _, pg := range pages {
@@ -179,6 +200,7 @@ func modeByWeight(weight map[float64]int) float64 {
 	var best float64
 	bestN := -1
 	for v, n := range weight {
+		// Ties go to the smaller value so the result is deterministic.
 		if n > bestN || (n == bestN && v < best) {
 			best, bestN = v, n
 		}
@@ -186,6 +208,7 @@ func modeByWeight(weight map[float64]int) float64 {
 	return best
 }
 
+// estimateWidth guesses a string's width from character classes; it is used only when real widths are missing or unreliable.
 func estimateWidth(s string, fontSize float64) float64 {
 	total := 0.0
 	for _, r := range s {
@@ -222,6 +245,7 @@ func maxF(a, b float64) float64 {
 	return b
 }
 
+// roundHalf rounds to the nearest 0.5.
 func roundHalf(v float64) float64 {
 	return float64(int(v*2+0.5)) / 2
 }

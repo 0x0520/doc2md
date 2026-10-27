@@ -1,3 +1,6 @@
+// Package odf converts OpenDocument text (.odt), spreadsheet (.ods) and
+// presentation (.odp) files to Markdown by walking the package's content.xml
+// with one shared vocabulary: headings, paragraphs, lists and tables.
 package odf
 
 import (
@@ -15,13 +18,19 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// ErrNotODF is returned when the input is not a zip with a content.xml.
 var ErrNotODF = errors.New("not a readable OpenDocument package")
 
 const (
+	// Spreadsheets declare their unused region as one cell or row repeated
+	// thousands of times (e.g. number-columns-repeated="16384"). Empty runs are
+	// only counted, never materialised, and runs with content are capped here.
 	maxRepeat = 4096
 	maxCells  = 1 << 20
 )
 
+// ToMarkdown converts OpenDocument bytes to Markdown and returns the images
+// stored in the package (conventionally under Pictures/).
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -43,8 +52,13 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return mdrender.Document(blocks), p.images, nil
 }
 
+// nsDrawing is the namespace name of the drawing vocabulary. Documents bind it
+// to the prefix "draw" but the URI says "drawing"; ns() yields the URI segment,
+// which is what must be matched, since prefixes are arbitrary.
 const nsDrawing = "drawing"
 
+// ns returns the name segment of an element's namespace URI
+// ("urn:oasis:names:tc:opendocument:xmlns:<name>:1.0"), e.g. "text" or "table".
 func ns(n xml.Name) string {
 	if i := strings.LastIndex(n.Space, ":"); i > 0 {
 		if j := strings.LastIndex(n.Space[:i], ":"); j >= 0 {
@@ -54,6 +68,7 @@ func ns(n xml.Name) string {
 	return n.Space
 }
 
+// attr returns the attribute with the given local name; space "" matches any namespace.
 func attr(e xml.StartElement, space, local string) string {
 	for _, a := range e.Attr {
 		if a.Name.Local == local && (space == "" || ns(a.Name) == space) {
@@ -63,6 +78,11 @@ func attr(e xml.StartElement, space, local string) string {
 	return ""
 }
 
+// parser accumulates blocks during a single walk of content.xml. sheets is set
+// for spreadsheets (each table is a named sheet and gets a heading; in text
+// documents table names like "Table1" are internal labels). titleFrame marks
+// paragraphs inside a slide's title placeholder, which are headings. page counts
+// slides or sheets so images can record where they stood.
 type parser struct {
 	blocks     []mdrender.Block
 	listDepth  int
@@ -105,11 +125,14 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 		}
 	case nsDrawing:
 		switch t.Name.Local {
+		// presentation:class="title" marks the slide's title placeholder.
 		case "frame":
 			p.titleFrame = attr(t, "presentation", "class") == "title"
 		case "page":
 			p.page++
 		case "image":
+			// href is matched without namespace: xlink's URI does not have the OpenDocument
+			// shape ns() parses, and draw:image has no other href attribute.
 			if mk := p.picture(attr(t, "", "href")); mk != "" {
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: mk})
 			}
@@ -163,6 +186,9 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 	}
 }
 
+// elemText returns the text of the element just opened, consuming it through
+// its end tag. Space, tab and line-break elements become one space, since the
+// result is a single Markdown line.
 func elemText(dec *xml.Decoder) string {
 	var b strings.Builder
 	depth := 1
@@ -191,6 +217,7 @@ func elemText(dec *xml.Decoder) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
+// readTable reads the rows of a table, consuming it through its end tag.
 func readTable(dec *xml.Decoder) [][]string {
 	var grid [][]string
 	cells := 0
@@ -206,6 +233,7 @@ func readTable(dec *xml.Decoder) [][]string {
 				row, n := readRow(dec)
 				cells += n
 				rep := repeat(t, "number-rows-repeated")
+				// A row repeated over the unused region has no content and is not worth repeating.
 				if len(row) == 0 {
 					continue
 				}
@@ -225,6 +253,8 @@ func readTable(dec *xml.Decoder) [][]string {
 	return grid
 }
 
+// readRow reads one row and returns it with its cell count. Empty cells only
+// advance the column position, which keeps the unused region from expanding.
 func readRow(dec *xml.Decoder) ([]string, int) {
 	var row []string
 	col := 0
@@ -262,6 +292,8 @@ func readRow(dec *xml.Decoder) ([]string, int) {
 	return row, len(row)
 }
 
+// repeat reads a repeat-count attribute, clamped to maxRepeat: large values are
+// layout artifacts for "the rest of the sheet", not content.
 func repeat(t xml.StartElement, name string) int {
 	n, err := strconv.Atoi(attr(t, "table", name))
 	if err != nil || n < 1 {
@@ -273,8 +305,11 @@ func repeat(t xml.StartElement, name string) int {
 	return n
 }
 
+// maxImageBytes caps the total image payload of one document.
 const maxImageBytes = 128 << 20
 
+// picture registers the package entry named by href and returns its marker, or
+// "" if it is missing, external or in an unsupported format.
 func (p *parser) picture(href string) string {
 	if href == "" || p.zr == nil || p.total >= maxImageBytes {
 		return ""

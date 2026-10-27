@@ -79,6 +79,7 @@ func TestConvertKeepsFigureOrderAcrossSlides(t *testing.T) {
 	}
 }
 
+// Pictures that cannot be shown or were never supplied leave no image and no marker.
 func TestConvertIgnoresUnreachablePictures(t *testing.T) {
 	t.Run("metafile in a docx", func(t *testing.T) {
 		md, images, err := Convert("spec.docx", docxWithPart(t, "word/media/image1.wmf", onePixelPNG))
@@ -111,6 +112,8 @@ func TestConvertIgnoresUnreachablePictures(t *testing.T) {
 	})
 }
 
+// zipOf builds a zip from (name, string-or-bytes) pairs. A leading "mimetype"
+// entry is stored uncompressed, as OpenDocument and EPUB require.
 func zipOf(t testing.TB, parts [][2]any) []byte {
 	t.Helper()
 	var buf bytes.Buffer

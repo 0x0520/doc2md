@@ -55,6 +55,7 @@ func TestTable(t *testing.T) {
 	}
 }
 
+// The generated bullet in \pntext must not appear next to the Markdown marker.
 func TestListMarkerNotDoubled(t *testing.T) {
 	in := `{\rtf1\ansi\pard{\pntext\f3 \'b7\tab}First item\par` +
 		`\pard{\pntext\f3 \'b7\tab}Second item\par}`
@@ -64,6 +65,7 @@ func TestListMarkerNotDoubled(t *testing.T) {
 	}
 }
 
+// The uc fallback characters after \uN must be skipped, not emitted.
 func TestUnicodeEscapeNotDoubled(t *testing.T) {
 	got := md(t, "{\\rtf1\\ansi\\uc1\\pard Price: \\u8364 ? 50\\par}")
 	if got != "Price: € 50\n" {
@@ -82,6 +84,7 @@ func TestCharacterControlWords(t *testing.T) {
 	}
 }
 
+// \binN payload bytes must not be parsed as RTF.
 func TestBinarySkipped(t *testing.T) {
 	got := md(t, `{\rtf1\ansi\pard Before \bin11 \par NOTTEXT After.\par}`)
 	if strings.Contains(got, "NOTTEXT") {

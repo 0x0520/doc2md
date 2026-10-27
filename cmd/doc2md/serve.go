@@ -15,6 +15,8 @@ import (
 	"github.com/0x0520/doc2md/service"
 )
 
+// serveCommand implements "doc2md serve": it parses the serve flags and runs the
+// service until interrupted.
 func serveCommand(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", envOr("DOC2MD_ADDR", "127.0.0.1:8090"), "address to listen on")
@@ -52,11 +54,16 @@ endpoints:
 	return listenAndServe(ctx, *addr, handler)
 }
 
+// listenAndServe serves handler on addr until ctx is cancelled, then shuts down
+// gracefully.
 func listenAndServe(ctx context.Context, addr string, handler http.Handler) error {
+	// Bind before announcing the address, so a busy port fails at startup instead of
+	// leaving a service that looks up but is not.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
+	// Only the header read is bounded here; request bodies are bounded by the handler's size limit.
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -84,6 +91,7 @@ func listenAndServe(ctx context.Context, addr string, handler http.Handler) erro
 	}
 }
 
+// envOr returns the environment variable key, or def if it is unset or empty.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

@@ -1,3 +1,5 @@
+// Package service exposes doc2md as an HTTP service: POST /api/convert, GET
+// /api/config, GET /api/health, and an optional embedded web UI at /.
 package service
 
 import (
@@ -15,11 +17,15 @@ import (
 	"github.com/0x0520/doc2md/service/ui"
 )
 
+// DefaultMaxBytes is the largest document accepted when Options.MaxBytes is unset.
 const DefaultMaxBytes = 32 << 20
 
+// Options configure Handler. The zero value serves the UI with DefaultMaxBytes.
 type Options struct {
+	// MaxBytes caps an uploaded document; zero means DefaultMaxBytes.
 	MaxBytes int64
-	NoUI     bool
+	// NoUI serves the API only.
+	NoUI bool
 }
 
 func (o Options) maxBytes() int64 {
@@ -29,6 +35,8 @@ func (o Options) maxBytes() int64 {
 	return DefaultMaxBytes
 }
 
+// Handler returns the service's HTTP handler: the /api/* endpoints plus, unless
+// opts.NoUI is set, the web UI.
 func Handler(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -49,6 +57,8 @@ func Handler(opts Options) http.Handler {
 	return mux
 }
 
+// withoutAPI keeps the static file server from answering /api/*, so a mistyped
+// endpoint gets a JSON 404 instead of the HTML page.
 func withoutAPI(files http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
@@ -59,6 +69,7 @@ func withoutAPI(files http.Handler) http.Handler {
 	})
 }
 
+// wireImage is an Image as sent over JSON, with the bytes base64-encoded.
 type wireImage struct {
 	Seq        int    `json:"seq"`
 	Page       int    `json:"page"`
@@ -66,6 +77,7 @@ type wireImage struct {
 	DataBase64 string `json:"dataBase64"`
 }
 
+// wireResult is the JSON body of a successful /api/convert response.
 type wireResult struct {
 	Name     string      `json:"name"`
 	Format   string      `json:"format"`
@@ -76,8 +88,12 @@ type wireResult struct {
 	Millis   int64       `json:"ms"`
 }
 
+// convert reads one multipart document from the "file" field and answers with its
+// Markdown and figures. One document per request, so one failure cannot affect others.
 func convert(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	// The extra MiB leaves room for the multipart envelope around the document.
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+(1<<20))
+	// The argument is the in-memory part of the form; larger uploads spill to temp files.
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -106,6 +122,7 @@ func convert(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 		return
 	}
 
+	// The name selects the format; Convert sniffs the bytes when it has no useful extension.
 	name := filepath.Base(header.Filename)
 	verbatim := isTrue(r.FormValue("verbatim"))
 
@@ -117,6 +134,8 @@ func convert(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 	md, images, err := conv(name, data)
 	if err != nil {
 		if errors.Is(err, doc2md.ErrUnsupportedFormat) {
+			// 415 rather than 422: an unsupported format is not a conversion failure, and the
+			// message says what the user can do instead.
 			writeErr(w, http.StatusUnsupportedMediaType, errors.New(refusal(name)+wayOut(name)))
 			return
 		}
@@ -141,10 +160,12 @@ func convert(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// errTooLarge is the error for a document over the size limit.
 func errTooLarge(maxBytes int64) error {
 	return fmt.Errorf("document exceeds the limit of %d bytes", maxBytes)
 }
 
+// refusal says what was refused, naming the extension if there is one.
 func refusal(name string) string {
 	if ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."); ext != "" {
 		return "This format is not supported (." + ext + ")."
@@ -152,6 +173,8 @@ func refusal(name string) string {
 	return "This document does not match any supported format."
 }
 
+// wayOut suggests a next step for formats we know we cannot read, or lists the
+// supported ones.
 func wayOut(name string) string {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".doc":
@@ -167,6 +190,7 @@ func wayOut(name string) string {
 	}
 }
 
+// isTrue parses a form checkbox or flag value.
 func isTrue(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "on", "yes":
@@ -175,12 +199,14 @@ func isTrue(v string) bool {
 	return false
 }
 
+// writeJSON sends body as JSON with the given status.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// writeErr sends err as {"error": "..."}.
 func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]any{"error": err.Error()})
 }

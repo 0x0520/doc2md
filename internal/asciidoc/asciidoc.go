@@ -1,3 +1,7 @@
+// Package asciidoc converts AsciiDoc to Markdown structurally: section titles
+// become ATX headings, tables become pipe tables, and inline markup is
+// translated. It is not a full implementation: includes are not resolved and
+// unrecognised text passes through unchanged.
 package asciidoc
 
 import (
@@ -39,6 +43,8 @@ var charAttrs = map[string]string{
 func inline(s string) string {
 	s = hardBreakRe.ReplaceAllString(s, "")
 	s = roleSpanRe.ReplaceAllString(s, "$1")
+	// Only the doubled "++x++" form; its content is short and space-free so "C++ and
+	// Java++" is left alone. The single-plus form is indistinguishable from arithmetic.
 	s = passthroughRe.ReplaceAllString(s, "$1")
 	s = attrRefRe.ReplaceAllStringFunc(s, func(m string) string {
 		if c, ok := charAttrs[m[1:len(m)-1]]; ok {
@@ -53,9 +59,15 @@ func inline(s string) string {
 		}
 		return strings.TrimSpace(g[1])
 	})
+	// AsciiDoc bold is *x*, which Markdown reads as italic; no whitespace is allowed
+	// next to the delimiters so a list marker is not an opening one.
 	return boldRe.ReplaceAllString(s, "**$1**")
 }
 
+// isVerbatimDelim reports whether trimmed is four or more repetitions of one
+// verbatimDelimChars character (RE2 has no backreferences). "=" is excluded on
+// purpose: example blocks hold ordinary text, and one unpaired delimiter must
+// not disable conversion for the rest of the document (see sectionDelimRe).
 func isVerbatimDelim(trimmed string) bool {
 	if len(trimmed) < 4 || !strings.ContainsRune(verbatimDelimChars, rune(trimmed[0])) {
 		return false
@@ -63,12 +75,15 @@ func isVerbatimDelim(trimmed string) bool {
 	return strings.Count(trimmed, trimmed[:1]) == len(trimmed)
 }
 
+// ToMarkdown converts AsciiDoc to Markdown. It never fails; the error exists
+// so callers can dispatch uniformly with the other converters.
 func ToMarkdown(data []byte) (string, error) {
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 	shift := headingShift(lines)
 
 	var out []string
 	inVerbatim := false
+	// emit collapses blank-line runs: dropped markup and table padding would otherwise leave gaps.
 	emit := func(line string) {
 		if !inVerbatim && strings.TrimSpace(line) == "" {
 			if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) == "" {
@@ -86,6 +101,7 @@ func ToMarkdown(data []byte) (string, error) {
 
 		if isVerbatimDelim(trimmed) {
 			inVerbatim = !inVerbatim
+			// A fence, not the AsciiDoc delimiter: a dash run is a thematic break in Markdown.
 			out = append(out, "```")
 			continue
 		}
@@ -128,6 +144,8 @@ func ToMarkdown(data []byte) (string, error) {
 	return strings.TrimSpace(strings.Join(out, "\n")), nil
 }
 
+// headingShift returns how many "=" to subtract so the shallowest title becomes
+// "#"; chapters extracted from a book often start at "===".
 func headingShift(lines []string) int {
 	shallowest := 0
 	inVerbatim := false
@@ -157,12 +175,16 @@ type cell struct {
 	colspan, rowspan int
 }
 
+// cellSpec is the specifier written before a cell separator. Alignment and
+// style are dropped; they have no Markdown counterpart.
 type cellSpec struct {
 	dup, colspan, rowspan int
 }
 
 var defaultSpec = cellSpec{dup: 1, colspan: 1, rowspan: 1}
 
+// cellSpecRe matches a whole specifier token. Every part is optional, so it
+// also matches ""; parseCellSpec excludes that.
 var cellSpecRe = regexp.MustCompile(`^(?:(\d+)\*)?(?:(\d*)(?:\.(\d+))?\+)?(?:[<^>]|\.[<^>]|[<^>]\.[<^>])?[aehlmdsv]?$`)
 
 func parseCellSpec(tok string) (cellSpec, bool) {
@@ -173,12 +195,16 @@ func parseCellSpec(tok string) (cellSpec, bool) {
 	if m == nil {
 		return defaultSpec, false
 	}
+	// A bare "+" is not a span; otherwise a cell ending in "C++" would lose its tail.
 	if strings.Contains(tok, "+") && m[2] == "" && m[3] == "" {
 		return defaultSpec, false
 	}
 	return cellSpec{dup: atLeastOne(m[1]), colspan: atLeastOne(m[2]), rowspan: atLeastOne(m[3])}, true
 }
 
+// collectTable returns the table's cells, its column count and the index of the
+// closing delimiter. The body is one cell stream, not a row per line, because
+// cell content (e.g. "a|" cells) may span lines.
 func collectTable(lines []string, delim int) (cells []cell, width, next int) {
 	end := len(lines)
 	for i := delim + 1; i < len(lines); i++ {
@@ -191,6 +217,8 @@ func collectTable(lines []string, delim int) (cells []cell, width, next int) {
 	return splitCells(strings.Join(body, "\n")), tableWidth(lines, delim, body), end
 }
 
+// tableWidth uses the cols attribute above the table, else the separators on
+// the first non-blank body line, as AsciiDoc does.
 func tableWidth(lines []string, delim int, body []string) int {
 	for k := delim - 1; k >= 0; k-- {
 		t := strings.TrimSpace(lines[k])
@@ -264,6 +292,9 @@ func splitUnescaped(s string) []string {
 	return append(out, cur.String())
 }
 
+// takeCellSpec splits a trailing specifier off a field; it describes the NEXT
+// cell. The field is not right-trimmed: a specifier touches the separator, so
+// trailing whitespace means none (a lone "a" cell is text, not a style marker).
 func takeCellSpec(field string) (text string, spec cellSpec) {
 	field = inline(field)
 	tok := field[strings.LastIndexAny(field, " \t\n")+1:]
@@ -280,6 +311,9 @@ func atLeastOne(digits string) int {
 	return 1
 }
 
+// layout cuts cells into rows and resolves spans in one pass, since where a row
+// ends depends on what a row span carries into it. Markdown has no merged
+// cells: column spans leave blanks, row spans repeat the text.
 func layout(cells []cell, width int) [][]string {
 	if width < 1 {
 		width = 1
@@ -350,6 +384,8 @@ func anyCarried(carry []carried) bool {
 	return false
 }
 
+// renderTable drops all-blank rows and columns (vertical spacing must not
+// become the header) and promotes the first row to header, as Markdown requires one.
 func renderTable(cells []cell, width int) []string {
 	grid := mdrender.NormalizeGrid(layout(cells, width))
 	if len(grid) == 0 {

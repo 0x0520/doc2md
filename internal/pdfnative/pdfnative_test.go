@@ -181,6 +181,8 @@ func TestChapterSequence(t *testing.T) {
 	})
 }
 
+// TestGroupBlocks_RepairsMovedFromDownstream covers heading and list decisions made
+// while lines are still separate: bulleted headings, doubled bullets, stranded section numbers.
 func TestGroupBlocks_RepairsMovedFromDownstream(t *testing.T) {
 	const body = 11.0
 	at := func(text string, y float64, size float64) line {

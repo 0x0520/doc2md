@@ -6,12 +6,16 @@ import (
 	"unicode"
 )
 
+// docStats summarises the document's typography for heading scoring.
 type docStats struct {
 	bodySize    float64
 	biggerSizes []float64
+	// weightBoost is 1 if any text line is bold, else 0, so bold only counts as a signal when the document uses it.
 	weightBoost float64
 }
 
+// computeStats collects the distinct font sizes above body size (rounded to half
+// points) from non-table lines.
 func computeStats(lines []line, body float64) docStats {
 	set := map[float64]bool{}
 	anyBold := false
@@ -38,6 +42,8 @@ func computeStats(lines []line, body float64) docStats {
 	return st
 }
 
+// sizeBoost returns 0..1: the rank of size among the sizes above body, so the
+// largest font scores 1.
 func (st docStats) sizeBoost(size float64) float64 {
 	if len(st.biggerSizes) == 0 || size <= st.bodySize {
 		return 0
@@ -52,6 +58,7 @@ func (st docStats) sizeBoost(size float64) float64 {
 	return float64(rank) / float64(len(st.biggerSizes))
 }
 
+// sizeLevels assigns heading levels by size: the largest distinct size becomes level 1.
 func sizeLevels(sizes []float64) map[float64]int {
 	set := map[float64]bool{}
 	for _, s := range sizes {
@@ -89,6 +96,7 @@ func startsWithDigit(text string) bool {
 	return false
 }
 
+// within reports whether a and b differ by at most the fraction rel of the larger.
 func within(a, b, rel float64) bool {
 	m := maxF(a, b)
 	if m == 0 {

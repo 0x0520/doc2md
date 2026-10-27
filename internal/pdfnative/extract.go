@@ -1,3 +1,7 @@
+// Package pdfnative converts PDF files to Markdown in pure Go. It interprets content
+// streams itself, rebuilds lines, tables and columns from glyph positions, removes
+// covers, contents pages and running headers/footers, and infers headings from
+// numbering and typography.
 package pdfnative
 
 import (
@@ -10,29 +14,38 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
+// PageBreak marks where the text of source page Page (1-based) starts in the Markdown;
+// Offset is a byte offset.
 type PageBreak struct {
 	Offset int
 	Page   int
 }
 
+// Extract renders the PDF to Markdown and discards images and page breaks.
 func Extract(data []byte) (string, error) {
 	md, _, err := Render(data)
 	return md, err
 }
 
+// Render renders the PDF to Markdown and returns the raster images that the
+// "[Image: N]" marker lines in the text refer to.
 func Render(data []byte) (string, []Image, error) {
 	md, images, _, err := RenderWithPages(data)
 	return md, images, err
 }
 
+// RenderWithPages is Render plus the position of each source page in the Markdown.
 func RenderWithPages(data []byte) (string, []Image, []PageBreak, error) {
 	return renderPDF(data, false)
 }
 
+// RenderVerbatim is RenderWithPages without the noise removal: cover page, contents
+// pages, running headers/footers and repeated decorative images are kept.
 func RenderVerbatim(data []byte) (string, []Image, []PageBreak, error) {
 	return renderPDF(data, true)
 }
 
+// renderPDF retries once on a copy rewritten by pdfcpu when the file cannot be read as is.
 func renderPDF(data []byte, verbatim bool) (string, []Image, []PageBreak, error) {
 	md, images, breaks, err := renderPDFOnce(data, verbatim)
 	if err == nil {
@@ -49,6 +62,8 @@ func renderPDF(data []byte, verbatim bool) (string, []Image, []PageBreak, error)
 	return md, images, breaks, nil
 }
 
+// rewritePDF repairs or decrypts a file with pdfcpu (relaxed validation): Decrypt first,
+// then Optimize, which rebuilds the cross-reference data.
 func rewritePDF(data []byte) (out []byte, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -71,6 +86,7 @@ func rewritePDF(data []byte) (out []byte, err error) {
 	return buf.Bytes(), nil
 }
 
+// pageTokens extracts a page's glyph runs; ok is false if the page's content stream is unreadable.
 func pageTokens(p pdf.Page) (toks []pdf.Text, places []imgPlace, height float64, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -81,6 +97,7 @@ func pageTokens(p pdf.Page) (toks []pdf.Text, places []imgPlace, height float64,
 	return toks, places, pageHeight(p), true
 }
 
+// renderPDFOnce converts panics from the PDF reader on malformed input into errors.
 func renderPDFOnce(data []byte, verbatim bool) (md string, images []Image, breaks []PageBreak, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -123,6 +140,7 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 		dropRunningHeadFoot(pages)
 	}
 	for pi := range pages {
+		// Columns are reordered before tables are assembled so the gutter is not read as a cell gap.
 		pages[pi].rows = splitColumnRows(pages[pi].rows)
 		pages[pi].lines = assembleRows(pages[pi].rows, verbatim)
 		for li := range pages[pi].lines {
@@ -141,6 +159,7 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 	return md, images, breaks, nil
 }
 
+// pageHeight returns the MediaBox height, or 0 if the page has none.
 func pageHeight(p pdf.Page) float64 {
 	mb := inherited(p.V, "MediaBox")
 	if mb.Kind() != pdf.Array || mb.Len() < 4 {
@@ -149,6 +168,7 @@ func pageHeight(p pdf.Page) float64 {
 	return mb.Index(3).Float64() - mb.Index(1).Float64()
 }
 
+// inherited looks a key up the page tree, since attributes like MediaBox may sit on an ancestor (PDF 32000-1 §7.7.3.4).
 func inherited(v pdf.Value, key string) pdf.Value {
 	for ; !v.IsNull(); v = v.Key("Parent") {
 		if r := v.Key(key); !r.IsNull() {

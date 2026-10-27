@@ -1,3 +1,4 @@
+// Package ooxml converts Word (.docx) and PowerPoint (.pptx) documents to Markdown.
 package ooxml
 
 import (
@@ -15,13 +16,16 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// ErrNotDocx is returned (wrapped) when the input is not a readable .docx.
 var ErrNotDocx = errors.New("not a readable .docx (OOXML) document")
 
+// ToMarkdown converts a .docx or .docm to Markdown and returns its embedded figures.
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: %v", ErrNotDocx, err)
 	}
+	// Only the parts the parser needs are inflated; the rest of the archive is left alone.
 	parts := map[string][]byte{}
 	for _, f := range zr.File {
 		switch f.Name {
@@ -49,12 +53,15 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return mdrender.Document(blocks), p.media.images, nil
 }
 
+// styleInfo is what heading detection needs from a style: its lowercased name,
+// outline level (-1 if unset) and parent style.
 type styleInfo struct {
 	name    string
 	outline int
 	basedOn string
 }
 
+// parseStyles indexes word/styles.xml by style id; unparsable XML gives an empty map.
 func parseStyles(b []byte) map[string]styleInfo {
 	out := map[string]styleInfo{}
 	if len(b) == 0 {
@@ -94,7 +101,9 @@ func parseStyles(b []byte) map[string]styleInfo {
 	return out
 }
 
+// parseDefaultSize returns the document's default font size in half-points.
 func parseDefaultSize(b []byte) int {
+	// Word's own default of 11 pt, in half-points.
 	const wordDefault = 22
 	if len(b) == 0 {
 		return wordDefault
@@ -119,6 +128,8 @@ func parseDefaultSize(b []byte) int {
 	return wordDefault
 }
 
+// headingLevel resolves a style to a Markdown heading depth, or 0 if it is not a
+// heading. The basedOn chain is followed at most 10 steps to survive cycles.
 func headingLevel(styles map[string]styleInfo, styleID string) int {
 	for i := 0; styleID != "" && i < 10; i++ {
 		s, ok := styles[styleID]
@@ -129,6 +140,7 @@ func headingLevel(styles map[string]styleInfo, styleID string) int {
 			return lvl
 		}
 		if s.outline >= 0 && s.outline <= 8 {
+			// Outline level 0 is a top-level heading; h1 is reserved for Title, hence the offset.
 			return s.outline + 2
 		}
 		styleID = s.basedOn
@@ -136,6 +148,7 @@ func headingLevel(styles map[string]styleInfo, styleID string) int {
 	return 0
 }
 
+// headingFromName maps the built-in style names "title" and "heading 1".."heading 9".
 func headingFromName(name string) int {
 	if name == "title" {
 		return 1
@@ -148,6 +161,8 @@ func headingFromName(name string) int {
 	return 0
 }
 
+// numbering resolves a list instance (numId) through its abstract definition to a
+// number format per level.
 type numbering struct {
 	numToAbstract map[string]string
 	abstractFmt   map[string]map[int]string
@@ -193,6 +208,7 @@ func parseNumbering(b []byte) *numbering {
 	return n
 }
 
+// ordered reports whether level ilvl of list numID is numbered rather than bulleted.
 func (n *numbering) ordered(numID string, ilvl int) bool {
 	abs, ok := n.numToAbstract[numID]
 	if !ok {
@@ -209,6 +225,7 @@ func (n *numbering) ordered(numID string, ilvl int) bool {
 	return f != "" && f != "bullet" && f != "none"
 }
 
+// parseRels returns hyperlink targets by relationship id.
 func parseRels(b []byte) map[string]string {
 	out := map[string]string{}
 	if len(b) == 0 {
@@ -233,6 +250,7 @@ func parseRels(b []byte) map[string]string {
 	return out
 }
 
+// parser carries the lookup tables for one pass over word/document.xml.
 type parser struct {
 	styles      map[string]styleInfo
 	nums        *numbering
@@ -242,6 +260,8 @@ type parser struct {
 	embeds      map[string]string
 }
 
+// parseDocument streams document.xml into blocks. Top-level paragraphs and tables
+// are found by scanning every element, so content inside w:sdt wrappers is included.
 func (p *parser) parseDocument(b []byte) []mdrender.Block {
 	dec := xml.NewDecoder(bytes.NewReader(b))
 	var blocks []mdrender.Block
@@ -273,12 +293,15 @@ func (p *parser) parseDocument(b []byte) []mdrender.Block {
 			}
 		}
 	}
+	// No paragraph used a heading style: fall back to inferring headings from font size.
 	if !styled {
 		promoteBySize(blocks, sizes)
 	}
 	return blocks
 }
 
+// paragraphBlock reads a w:p whose start tag was consumed. It returns the block,
+// the largest run size in half-points, and false for an empty paragraph.
 func (p *parser) paragraphBlock(dec *xml.Decoder) (mdrender.Block, int, bool) {
 	styleID, numID, ilvl, hasNum := "", "", 0, false
 	size := 0
@@ -356,6 +379,7 @@ func (p *parser) paragraphProps(dec *xml.Decoder) (styleID, numID string, ilvl i
 	return
 }
 
+// numPr reads w:numPr. ilvl is clamped to 0-8, the range Word allows.
 func (p *parser) numPr(dec *xml.Decoder) (numID string, ilvl int, has bool) {
 	has = true
 	depth := 1
@@ -405,6 +429,7 @@ func (p *parser) runText(dec *xml.Decoder) (string, int) {
 			switch t.Name.Local {
 			case "t":
 				sb.WriteString(readText(dec))
+			// Tabs and line breaks become spaces: a Markdown paragraph is a single line.
 			case "tab":
 				sb.WriteString(" ")
 			case "br", "cr":
@@ -450,6 +475,8 @@ func (p *parser) runSize(dec *xml.Decoder) int {
 	return size
 }
 
+// hyperlink renders a w:hyperlink as a Markdown link, or as plain text when the
+// relationship does not resolve.
 func (p *parser) hyperlink(dec *xml.Decoder, start xml.StartElement) string {
 	rID := attr(start, "id")
 	var sb strings.Builder
@@ -534,6 +561,8 @@ func (p *parser) tableRow(dec *xml.Decoder) []string {
 	return row
 }
 
+// cellText flattens a cell's paragraphs and nested tables onto one line, since a
+// pipe-table cell cannot hold blocks.
 func (p *parser) cellText(dec *xml.Decoder) string {
 	var parts []string
 	depth := 1
@@ -565,6 +594,7 @@ func (p *parser) cellText(dec *xml.Decoder) string {
 	return collapseSpaces(strings.Join(parts, " "))
 }
 
+// stripListMarker returns a list block's text without its indent and marker.
 func stripListMarker(b mdrender.Block) string {
 	if b.Kind != mdrender.List {
 		return b.Text
@@ -575,6 +605,7 @@ func stripListMarker(b mdrender.Block) string {
 	return t
 }
 
+// skip consumes the rest of the element whose start tag was just read.
 func skip(dec *xml.Decoder) {
 	depth := 1
 	for depth > 0 {
@@ -591,6 +622,7 @@ func skip(dec *xml.Decoder) {
 	}
 }
 
+// readText returns the character data of the element whose start tag was just read.
 func readText(dec *xml.Decoder) string {
 	var sb strings.Builder
 	depth := 1
@@ -611,6 +643,7 @@ func readText(dec *xml.Decoder) string {
 	return sb.String()
 }
 
+// attr returns the attribute with this local name, ignoring its namespace prefix.
 func attr(se xml.StartElement, local string) string {
 	for _, a := range se.Attr {
 		if a.Name.Local == local {
@@ -625,10 +658,16 @@ func collapseSpaces(s string) string {
 }
 
 const (
+	// Limits for size-based heading promotion: a heading is at most maxHeadingChars
+	// long, and promotion is abandoned if candidates reach 1/maxPromotedShare of all
+	// paragraphs (then the size differences are formatting, not structure).
 	maxHeadingChars  = 120
 	maxPromotedShare = 2
 )
 
+// promoteBySize turns paragraphs set larger than the body text into headings, for
+// documents that use no heading styles. Body size is the one carrying the most
+// characters; larger sizes rank to levels 1.., biggest first.
 func promoteBySize(blocks []mdrender.Block, sizes []int) {
 	chars := map[int]int{}
 	paragraphs := 0
@@ -681,6 +720,8 @@ func isSizeHeading(blk mdrender.Block, size, body int) bool {
 	return blk.Kind == mdrender.Paragraph && size > body && len(blk.Text) <= maxHeadingChars
 }
 
+// picture returns the marker for the image inside a drawing, pict or object
+// element (closing is its tag name), or "" if there is none.
 func (p *parser) picture(dec *xml.Decoder, closing string) string {
 	id := embedID(dec, closing)
 	if id == "" || p.media == nil {

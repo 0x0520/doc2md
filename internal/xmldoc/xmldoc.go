@@ -1,3 +1,6 @@
+// Package xmldoc converts arbitrary, schema-less XML to Markdown by its shape:
+// elements become headings, leaf elements become labelled values and runs of
+// same-named sibling records become tables.
 package xmldoc
 
 import (
@@ -11,14 +14,21 @@ import (
 	"github.com/0x0520/doc2md/internal/mdrender"
 )
 
+// maxNodes and maxDepth bound the tree built from untrusted input (depth drives
+// recursion, node count drives allocation); exceeding them truncates instead of failing.
+// minTableRows is the shortest run of same-named records rendered as a table.
 const (
 	maxNodes     = 200_000
 	maxDepth     = 64
 	minTableRows = 2
 )
 
+// ErrNoContent is returned when the document holds no text at all.
 var ErrNoContent = errors.New("no content in XML document")
 
+// node is one element. parts keeps text and children in document order, which
+// is what separates prose with inline markup from a record: "<p>a <b>b</b> c</p>"
+// and "<f><x/><y/></f>" have the same parts by type but different meaning.
 type node struct {
 	name  string
 	attrs [][2]string
@@ -32,6 +42,8 @@ type part struct {
 	kid  *node
 }
 
+// mixed reports whether the element interleaves its own text with child
+// elements, i.e. prose with inline markup rather than a record of fields.
 func (n *node) mixed() bool {
 	if len(n.kids) == 0 || n.text == "" {
 		return false
@@ -47,6 +59,7 @@ func (n *node) mixed() bool {
 	return false
 }
 
+// flatten renders the element and its descendants as one line of prose in document order.
 func (n *node) flatten() string {
 	var b strings.Builder
 	for _, p := range n.parts {
@@ -68,8 +81,11 @@ func (n *node) flatten() string {
 	return b.String()
 }
 
+// leaf reports whether the node has no child elements.
 func (n *node) leaf() bool { return len(n.kids) == 0 }
 
+// fields returns attributes followed by leaf children as name/value pairs, one
+// table row's worth; attributes and child elements are treated alike.
 func (n *node) fields() [][2]string {
 	out := make([][2]string, 0, len(n.attrs)+len(n.kids))
 	out = append(out, n.attrs...)
@@ -84,6 +100,7 @@ func (n *node) fields() [][2]string {
 	return out
 }
 
+// value is a leaf's text with its attributes appended, so none are lost.
 func (n *node) value() string {
 	parts := make([]string, 0, len(n.attrs)+1)
 	if n.text != "" {
@@ -95,6 +112,8 @@ func (n *node) value() string {
 	return strings.Join(parts, " ")
 }
 
+// ToMarkdown converts XML to Markdown. Unparseable input is an error; input
+// that breaks midway is rendered as far as it parsed.
 func ToMarkdown(data []byte) (string, error) {
 	root, err := parse(data)
 	if err != nil {
@@ -112,6 +131,8 @@ func ToMarkdown(data []byte) (string, error) {
 	return md, nil
 }
 
+// parse builds the element tree, collapsing character data to single spaces
+// (indentation is layout, not content) and tolerating non-strict XML.
 func parse(data []byte) (*node, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = false
@@ -133,6 +154,7 @@ func parse(data []byte) (*node, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if nodes >= maxNodes || len(stack) >= maxDepth {
+				// Skip the over-limit subtree and continue with its siblings, so the limit costs a subtree, not the document.
 				if err := dec.Skip(); err != nil {
 					return root, nil
 				}
@@ -177,13 +199,17 @@ func parse(data []byte) (*node, error) {
 
 func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// render emits a container as a heading with its values, and runs of
+// same-named records as tables.
 func render(n *node, level int, out *[]string) {
+	// Prose with inline markup is kept as a sentence, not split into one labelled line per inline element.
 	if n.mixed() {
 		if s := n.flatten(); s != "" {
 			*out = append(*out, s, "")
 		}
 		return
 	}
+	// An empty element (spacer, line break) has no information in its name alone.
 	if n.text == "" && len(n.attrs) == 0 && len(n.kids) == 0 {
 		return
 	}
@@ -214,6 +240,8 @@ func render(n *node, level int, out *[]string) {
 	}
 }
 
+// ownFields returns what sits directly under a container's heading: attributes,
+// own text and leaf children that are not part of a record run.
 func ownFields(n *node) [][2]string {
 	out := append([][2]string(nil), n.attrs...)
 	if n.text != "" {
@@ -234,6 +262,8 @@ func ownFields(n *node) [][2]string {
 	return out
 }
 
+// recordRun returns how many consecutive siblings from i share a name and are
+// records; such a run is rendered as a table body.
 func recordRun(kids []*node, i int) int {
 	name := kids[i].name
 	n := 0
@@ -246,6 +276,7 @@ func recordRun(kids []*node, i int) int {
 	return n
 }
 
+// isRecord reports whether n is a flat bag of at least one value (no container children).
 func isRecord(n *node) bool {
 	for _, k := range n.kids {
 		if !k.leaf() {
@@ -255,6 +286,8 @@ func isRecord(n *node) bool {
 	return len(n.fields()) > 0
 }
 
+// recordTable renders records as a pipe table. Columns are the union of field
+// names in first-seen order, so a missing field leaves a blank cell instead of shifting the row.
 func recordTable(records []*node) string {
 	var cols []string
 	seen := map[string]bool{}

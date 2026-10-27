@@ -1,3 +1,5 @@
+// Package rtf converts RTF documents to Markdown with a single-pass control-word
+// scanner: text, headings, bullet lists, tables and embedded PNG/JPEG pictures.
 package rtf
 
 import (
@@ -9,10 +11,14 @@ import (
 	"github.com/0x0520/doc2md/internal/mdrender"
 )
 
+// ErrNotRTF is returned when the input is not RTF or contains no text.
 var ErrNotRTF = errors.New("not a readable RTF document")
 
+// maxCells bounds the table cells collected from one document.
 const maxCells = 1 << 20
 
+// Destinations whose content is not body text (font and color tables, headers,
+// footers, footnotes, field codes, list definitions) and is dropped.
 var skipDestinations = map[string]bool{
 	"fonttbl": true, "colortbl": true, "stylesheet": true, "info": true,
 	"pict": true, "header": true, "footer": true, "headerl": true, "headerr": true,
@@ -23,8 +29,11 @@ var skipDestinations = map[string]bool{
 	"pn": true, "pntxtb": true, "pntxta": true,
 }
 
+// Destinations holding the generated bullet or number of a list item. The text is
+// dropped and the paragraph is emitted as a list item instead.
 var markerDestinations = map[string]bool{"pntext": true, "listtext": true}
 
+// Control words that stand for a single character.
 var charWords = map[string]string{
 	"lquote": "‘", "rquote": "’", "ldblquote": "“", "rdblquote": "”",
 	"endash": "–", "emdash": "—", "bullet": "•",
@@ -32,11 +41,15 @@ var charWords = map[string]string{
 	"tab": " ", "line": " ", "softline": " ",
 }
 
+// Windows-1252 characters for bytes 0x80-0x9F, where it differs from Latin-1.
 var cp1252High = []rune{
 	'€', 0x81, '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', 0x8D, 'Ž', 0x8F,
 	0x90, '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', 0x9D, 'ž', 'Ÿ',
 }
 
+// state is the formatting state of one group; it is saved on '{' and restored on '}'.
+// uc is the number of fallback characters after a \u escape, level the heading
+// level of the current paragraph (0 for body text).
 type state struct {
 	skip  bool
 	uc    int
@@ -45,6 +58,8 @@ type state struct {
 	table bool
 }
 
+// parser accumulates blocks while walking the RTF source. Text goes to cell while
+// inside a table row, otherwise to para.
 type parser struct {
 	styleLevel map[int]int
 	blocks     []mdrender.Block
@@ -61,6 +76,7 @@ type parser struct {
 	images []docimg.Image
 }
 
+// ToMarkdown converts RTF bytes to Markdown and returns embedded pictures.
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	s := string(data)
 	if !strings.HasPrefix(strings.TrimLeft(s, " \t\r\n"), `{\rtf`) {
@@ -76,6 +92,7 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return mdrender.Document(p.blocks), p.images, nil
 }
 
+// walk scans s once, tracking group nesting; control words are handled in apply.
 func (p *parser) walk(s string) {
 	st := state{uc: 1}
 	var stack []state
@@ -93,6 +110,7 @@ func (p *parser) walk(s string) {
 		case '\\':
 			word, arg, hasArg, next := control(s, i)
 			i = p.apply(&st, s, word, arg, hasArg, next)
+		// Raw line breaks are not content in RTF; \par is the paragraph break.
 		case '\r', '\n':
 			i++
 		default:
@@ -104,8 +122,10 @@ func (p *parser) walk(s string) {
 	}
 }
 
+// apply handles one control word and returns the index to continue scanning from.
 func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int) int {
 	switch word {
+	// \* marks an ignorable destination: the rest of the group is dropped.
 	case "*":
 		st.skip = true
 	case `\`, "{", "}":
@@ -116,6 +136,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		if !st.skip {
 			p.write(" ")
 		}
+	// \'hh is one byte of the document code page, taken as Windows-1252.
 	case "'":
 		if next+2 <= len(s) {
 			if b, err := strconv.ParseUint(s[next:next+2], 16, 8); err == nil && !st.skip {
@@ -123,6 +144,8 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 			}
 			return next + 2
 		}
+	// \uN is a UTF-16 code unit as a signed 16-bit number; the uc fallback characters
+	// that follow it are skipped.
 	case "u":
 		if hasArg {
 			r := arg
@@ -138,6 +161,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		if hasArg {
 			st.uc = arg
 		}
+	// \binN is followed by N raw bytes that must not be parsed as RTF.
 	case "bin":
 		if hasArg && arg > 0 && next+arg <= len(s) {
 			return next + arg
@@ -153,6 +177,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 		p.endCell()
 	case "row":
 		p.endRow()
+	// Outline level 0 is the top level, which becomes a level-1 heading.
 	case "outlinelevel":
 		if hasArg && arg >= 0 && arg <= 8 {
 			st.level = arg + 1
@@ -164,6 +189,7 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 				st.level = lvl
 			}
 		}
+	// Pictures are decoded by picture; the rest of the group (hex data) is skipped.
 	case "pict":
 		st.skip = true
 		if end := p.picture(s, next); end > 0 {
@@ -201,6 +227,7 @@ func (p *parser) writeByte(b byte) {
 	p.write(string(rune(b)))
 }
 
+// openRow starts a table row, flushing any open paragraph so it stays outside the table.
 func (p *parser) openRow(st state) {
 	if p.inRow {
 		return
@@ -209,6 +236,7 @@ func (p *parser) openRow(st state) {
 	p.inRow = true
 }
 
+// endCell closes the current cell; past maxCells the row is closed to stop growth.
 func (p *parser) endCell() {
 	if !p.inRow {
 		return
@@ -232,6 +260,8 @@ func (p *parser) endRow() {
 	p.inRow = false
 }
 
+// flushParagraph emits the pending text as a list item, heading or paragraph. Inside
+// a table row a paragraph break only separates words within the cell.
 func (p *parser) flushParagraph(st state) {
 	if p.inRow {
 		p.cell.WriteString(" ")
@@ -267,8 +297,12 @@ func (p *parser) flushTable() {
 	p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Table_, Text: mdrender.Table(grid)})
 }
 
+// squeeze collapses runs of whitespace to single spaces.
 func squeeze(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// control parses the control word or symbol at s[i] (a backslash). It returns the
+// word, its optional numeric argument, and the index after it, including the one
+// space that delimits a control word.
 func control(s string, i int) (word string, arg int, hasArg bool, next int) {
 	j := i + 1
 	if j >= len(s) {
@@ -303,6 +337,7 @@ func control(s string, i int) (word string, arg int, hasArg bool, next int) {
 	return word, arg, hasArg, n
 }
 
+// skipUnits skips the n fallback characters after \uN; a \'hh escape counts as one.
 func skipUnits(s string, i, n int) int {
 	for ; n > 0 && i < len(s); n-- {
 		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '\'' {
@@ -325,6 +360,8 @@ func skipUnits(s string, i, n int) int {
 func isAlpha(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
+// parseStylesheet maps paragraph style numbers (\sN) to heading levels, using the
+// \outlinelevel of each style definition.
 func parseStylesheet(s string) map[int]int {
 	out := map[int]int{}
 	start := strings.Index(s, `{\stylesheet`)
@@ -365,6 +402,7 @@ func parseStylesheet(s string) map[int]int {
 	return out
 }
 
+// group returns the contents of the brace group opening at s[i], honouring escapes.
 func group(s string, i int) (string, bool) {
 	depth := 0
 	for j := i; j < len(s); j++ {

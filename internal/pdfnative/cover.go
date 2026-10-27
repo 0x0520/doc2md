@@ -2,8 +2,11 @@ package pdfnative
 
 import "strings"
 
+// minPagesForCover is the shortest document that may lose a cover page.
 const minPagesForCover = 3
 
+// dropCoverPage drops the first page when the first numbered heading appears only on
+// page 3 or later, which means the opening pages are title and front matter.
 func dropCoverPage(pages []page) []page {
 	if len(pages) < minPagesForCover {
 		return pages

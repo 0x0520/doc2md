@@ -12,6 +12,7 @@ var fuzzExts = []string{
 	".epub", ".rtf", ".html", ".xml", ".adoc", ".md", "",
 }
 
+// minimalPDF builds a one-page PDF with a heading line and a body line, as a fuzz seed.
 func minimalPDF(text string) []byte {
 	objs := []string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
@@ -39,6 +40,7 @@ func minimalPDF(text string) []byte {
 	return b.Bytes()
 }
 
+// FuzzConvert feeds arbitrary bytes to every reader; none may panic or take more than 2s.
 func FuzzConvert(f *testing.F) {
 	seeds := map[string][]byte{
 		".pdf":  minimalPDF("Heading"),

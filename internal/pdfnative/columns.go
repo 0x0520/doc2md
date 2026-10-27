@@ -9,18 +9,28 @@ import (
 )
 
 const (
-	colMinSideRows  = 9
-	colMinFill      = 0.55
-	colMinWidthFS   = 8.0
-	colMaxLeadFS    = 2.4
-	colMinClearFS   = 0.3
-	colScanSteps    = 64
-	colMaxDepth     = 2
+	// Prose-column detection thresholds. A side is a candidate column only if it has
+	// colMinSideRows rows, its median line fills colMinFill of the p90 line width, is
+	// at least colMinWidthFS font sizes wide, and its median line pitch is within
+	// colMaxLeadFS font sizes. colMinClearFS is the minimum gutter width.
+	colMinSideRows = 9
+	colMinFill     = 0.55
+	colMinWidthFS  = 8.0
+	colMaxLeadFS   = 2.4
+	colMinClearFS  = 0.3
+	colScanSteps   = 64
+	colMaxDepth    = 2
+	// colSegGapFactor is tighter than a table cell gap (cellGapFactor): some layouts leave
+	// barely a font size between columns, while word gaps stay near 0.3.
 	colSegGapFactor = 1.0
 )
 
+// colSeg is a run of tokens without a cell-sized gap, keeping both x edges.
 type colSeg struct{ x0, x1 float64 }
 
+// splitColumnRows puts the rows of multi-column pages into reading order, left column
+// first. It only acts when both sides look like dense prose, so a two-column
+// table is left alone; when in doubt the rows are returned unchanged.
 func splitColumnRows(rows [][]pdf.Text) [][]pdf.Text {
 	return splitColumnsDepth(rows, 0)
 }
@@ -47,6 +57,7 @@ func splitColumnsDepth(rows [][]pdf.Text, depth int) [][]pdf.Text {
 		}
 	}
 	for i, row := range rows {
+		// Rows crossing the gutter (titles, spanning captions) cut the page into bands that are reordered separately.
 		if segsCross(segs[i], g) {
 			flush()
 			out = append(out, row)
@@ -58,6 +69,7 @@ func splitColumnsDepth(rows [][]pdf.Text, depth int) [][]pdf.Text {
 	return out
 }
 
+// rowSegs splits a row into horizontal segments at gaps wider than colSegGapFactor font sizes.
 func rowSegs(row []pdf.Text) []colSeg {
 	if len(row) == 0 {
 		return nil
@@ -90,6 +102,9 @@ func segsCross(segs []colSeg, g float64) bool {
 	return false
 }
 
+// findGutter scans x positions across the middle 30-70% of the text extent for the one
+// that separates the most rows into a left and a right population. It is purely
+// geometric; the content checks are in reorderBand.
 func findGutter(segs [][]colSeg) (float64, bool) {
 	minX, maxX := 1e18, -1e18
 	for _, ss := range segs {
@@ -115,6 +130,7 @@ func findGutter(segs [][]colSeg) (float64, bool) {
 			switch {
 			case segsCross(ss, g):
 				cross++
+			// Segments on both sides but none crossing: columns sharing a baseline.
 			case sidesOccupied(ss, g):
 				left++
 				right++
@@ -128,6 +144,7 @@ func findGutter(segs [][]colSeg) (float64, bool) {
 		if right < score {
 			score = right
 		}
+		// Spanning rows must stay a minority: on a single-column page nearly every row crosses any candidate gutter.
 		if score >= colMinSideRows && cross <= score && score > bestScore {
 			bestG, bestScore = g, score
 		}
@@ -157,6 +174,9 @@ func allLeft(segs []colSeg, g float64) bool {
 	return true
 }
 
+// reorderBand returns a band's rows left column first if it passes the prose checks,
+// otherwise unchanged. Rows with text on both sides are split into halves, and each
+// side is split again for three or more columns.
 func reorderBand(band [][]pdf.Text, g float64, depth int) [][]pdf.Text {
 	var leftRows, rightRows [][]pdf.Text
 	var leftWidths, rightWidths, leftYs, rightYs []float64
@@ -189,6 +209,9 @@ func reorderBand(band [][]pdf.Text, g float64, depth int) [][]pdf.Text {
 		fs = 10
 	}
 
+	// Guards against reading a two-column table as text columns: both sides must be
+	// balanced, wide, evenly filled, regularly spaced, one text run per line, and
+	// start many lines lowercase (prose wraps mid-sentence).
 	proseColumns := len(leftRows) >= colMinSideRows && len(rightRows) >= colMinSideRows &&
 		balanced(len(leftRows), len(rightRows)) &&
 		clearance(leftRows, rightRows) >= colMinClearFS*fs &&
@@ -206,6 +229,8 @@ func reorderBand(band [][]pdf.Text, g float64, depth int) [][]pdf.Text {
 	)
 }
 
+// multiSegFrac is the share of rows containing a cell-sized gap: near 0 for a prose
+// column, high for the inner half of a wider table.
 func multiSegFrac(rows [][]pdf.Text, fs float64) float64 {
 	if len(rows) == 0 {
 		return 1
@@ -225,6 +250,7 @@ func multiSegFrac(rows [][]pdf.Text, fs float64) float64 {
 	return float64(multi) / float64(len(rows))
 }
 
+// lowercaseStartFrac is the share of rows starting with a lowercase letter. A table's key column starts records with capitals.
 func lowercaseStartFrac(rows [][]pdf.Text) float64 {
 	if len(rows) == 0 {
 		return 0
@@ -238,6 +264,7 @@ func lowercaseStartFrac(rows [][]pdf.Text) float64 {
 	return float64(lower) / float64(len(rows))
 }
 
+// clearance is the realised gutter width. The 5th/95th percentiles ignore stray outlier rows.
 func clearance(leftRows, rightRows [][]pdf.Text) float64 {
 	rightEdges := make([]float64, 0, len(leftRows))
 	for _, r := range leftRows {
@@ -272,6 +299,7 @@ func maxEnd(toks []pdf.Text) float64 {
 	return v
 }
 
+// fillRatio is median line width over p90 width: near 1 for justified prose, low for ragged table cells.
 func fillRatio(widths []float64) float64 {
 	if len(widths) == 0 {
 		return 0
@@ -283,6 +311,7 @@ func fillRatio(widths []float64) float64 {
 	return medianF(widths) / wide
 }
 
+// medianLeading is the median baseline distance; it returns a huge value when it cannot be measured, so the leading check fails.
 func medianLeading(ys []float64) float64 {
 	if len(ys) < 2 {
 		return 1e18
@@ -301,6 +330,7 @@ func medianLeading(ys []float64) float64 {
 	return medianF(deltas)
 }
 
+// balanced reports whether the larger count is at most three times the smaller.
 func balanced(a, b int) bool {
 	if a == 0 || b == 0 {
 		return false
@@ -313,6 +343,7 @@ func balanced(a, b int) bool {
 
 func medianF(vs []float64) float64 { return quantileF(vs, 0.5) }
 
+// quantileF returns the q-quantile by index, without interpolation.
 func quantileF(vs []float64, q float64) float64 {
 	if len(vs) == 0 {
 		return 0

@@ -1,3 +1,5 @@
+// Package sheets converts spreadsheets (.xlsx, .xlsm, legacy .xls including Excel
+// 2003 XML, and CSV) to Markdown tables, one section per sheet.
 package sheets
 
 import (
@@ -15,15 +17,21 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// ErrUnsupported is returned for a filename extension this package does not read.
 var ErrUnsupported = errors.New("not a supported spreadsheet format")
 
+// maxCellsPerSheet bounds the cells read from one sheet.
 const maxCellsPerSheet = 4 << 20
 
+// ToMarkdown converts a spreadsheet to Markdown. The filename's extension picks the
+// reader, because CSV and workbooks cannot be told apart reliably by content.
+// Figures are only extracted from .xlsx and .xlsm.
 func ToMarkdown(filename string, data []byte) (string, []docimg.Image, error) {
 	switch strings.ToLower(filepath.Ext(filename)) {
 	case ".xlsx", ".xlsm":
 		return xlsxToMarkdown(data)
 	case ".xls":
+		// Excel 2003 "XML Spreadsheet" files are saved with an .xls extension.
 		if isSpreadsheetML(data) {
 			md, err := spreadsheetMLToMarkdown(data)
 			return md, nil, err
@@ -38,6 +46,8 @@ func ToMarkdown(filename string, data []byte) (string, []docimg.Image, error) {
 	}
 }
 
+// sheet is one worksheet as raw rows. breaks maps a row index to a section title
+// that splits the table there; figures are image markers appended after the table.
 type sheet struct {
 	name    string
 	rows    [][]string
@@ -45,6 +55,8 @@ type sheet struct {
 	breaks  map[int]string
 }
 
+// render joins the sheets into one document. Sheets with no content are skipped,
+// and a name heading is only added when headings is set (not for CSV).
 func render(sheets []sheet, headings bool) (string, error) {
 	var blocks []mdrender.Block
 	for _, s := range sheets {
@@ -119,6 +131,7 @@ func xlsxToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return md, images, nil
 }
 
+// xlsxSheetRows streams a sheet's rows, stopping at maxCells.
 func xlsxSheetRows(f *excelize.File, name string, maxCells int) ([][]string, error) {
 	it, err := f.Rows(name)
 	if err != nil {
@@ -137,6 +150,8 @@ func xlsxSheetRows(f *excelize.File, name string, maxCells int) ([][]string, err
 		if len(cols) == 0 {
 			continue
 		}
+		// gap is the number of empty rows skipped since the last stored one; it keeps row
+		// positions and counts toward the cap, so a sparse sheet cannot allocate unbounded memory.
 		gap := cur - filled - 1
 		if cells+gap+len(cols) > maxCells {
 			break
@@ -178,6 +193,7 @@ func xlsToMarkdown(data []byte) (string, error) {
 	return render(sheets, true)
 }
 
+// safeRow returns nil instead of panicking: the xls library can panic on malformed BIFF rows.
 func safeRow(ws *xls.WorkSheet, i int) (row *xls.Row) {
 	defer func() {
 		if recover() != nil {
@@ -189,11 +205,13 @@ func safeRow(ws *xls.WorkSheet, i int) (row *xls.Row) {
 
 func csvToMarkdown(data []byte) (string, error) {
 	r := csv.NewReader(bytes.NewReader(data))
+	// Rows may have different lengths, and stray quotes are tolerated.
 	r.FieldsPerRecord = -1
 	r.LazyQuotes = true
 	r.Comma = sniffDelimiter(data)
 	var rows [][]string
 	for {
+		// A malformed record is skipped rather than failing the whole file.
 		rec, err := r.Read()
 		if err == io.EOF {
 			break
@@ -206,6 +224,8 @@ func csvToMarkdown(data []byte) (string, error) {
 	return render([]sheet{{rows: rows}}, false)
 }
 
+// sniffDelimiter guesses the CSV separator (comma, semicolon, tab or pipe) from the
+// first line; ties and lines with none default to comma.
 func sniffDelimiter(data []byte) rune {
 	head := data
 	if i := bytes.IndexByte(head, '\n'); i >= 0 {
@@ -221,8 +241,11 @@ func sniffDelimiter(data []byte) rune {
 	return best
 }
 
+// maxPictureBytes caps the total picture data extracted from one workbook sheet.
 const maxPictureBytes = 128 << 20
 
+// sheetPictures returns the pictures on a sheet, numbered after alreadyTaken so
+// figure sequence numbers stay unique across the workbook.
 func sheetPictures(f *excelize.File, name string, sheetNum, alreadyTaken int) []docimg.Image {
 	cells, err := f.GetPictureCells(name)
 	if err != nil {
