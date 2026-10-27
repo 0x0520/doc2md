@@ -27,7 +27,7 @@ func mustHex(s string) []byte {
 func TestConvertReturnsFiguresPerFormat(t *testing.T) {
 	tests := []struct {
 		name  string
-		build func(*testing.T) []byte
+		build func(testing.TB) []byte
 	}{
 		{"specification.docx", docxWithPicture},
 		{"presentation.pptx", pptxWithPicture},
@@ -111,7 +111,7 @@ func TestConvertIgnoresUnreachablePictures(t *testing.T) {
 	})
 }
 
-func zipOf(t *testing.T, parts [][2]any) []byte {
+func zipOf(t testing.TB, parts [][2]any) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -148,11 +148,11 @@ const wns = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/ma
 	`xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ` +
 	`xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"`
 
-func docxWithPicture(t *testing.T) []byte {
+func docxWithPicture(t testing.TB) []byte {
 	return docxWithPart(t, "word/media/image1.png", onePixelPNG)
 }
 
-func docxWithPart(t *testing.T, part string, payload []byte) []byte {
+func docxWithPart(t testing.TB, part string, payload []byte) []byte {
 	t.Helper()
 	target := strings.TrimPrefix(part, "word/")
 	body := `<w:p><w:r><w:t xml:space="preserve">Before </w:t></w:r>` +
@@ -186,7 +186,7 @@ func slideRels() string {
 		`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>`
 }
 
-func pptxWithPicture(t *testing.T) []byte {
+func pptxWithPicture(t testing.TB) []byte {
 	return zipOf(t, [][2]any{
 		{"[Content_Types].xml", `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`},
 		{"ppt/presentation.xml", `<?xml version="1.0"?><p:presentation ` + pns + `/>`},
@@ -196,7 +196,7 @@ func pptxWithPicture(t *testing.T) []byte {
 	})
 }
 
-func pptxWithTwoPictures(t *testing.T) []byte {
+func pptxWithTwoPictures(t testing.TB) []byte {
 	t.Helper()
 	return zipOf(t, [][2]any{
 		{"[Content_Types].xml", `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`},
@@ -209,7 +209,7 @@ func pptxWithTwoPictures(t *testing.T) []byte {
 	})
 }
 
-func xlsxWithPicture(t *testing.T) []byte {
+func xlsxWithPicture(t testing.TB) []byte {
 	t.Helper()
 	f := excelize.NewFile()
 	defer f.Close()
@@ -238,7 +238,7 @@ const odfNS = `xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" `
 	`xmlns:xlink="http://www.w3.org/1999/xlink" ` +
 	`xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"`
 
-func odtWithPicture(t *testing.T) []byte {
+func odtWithPicture(t testing.TB) []byte {
 	body := `<office:text><text:h text:outline-level="1">Chapter</text:h>` +
 		`<text:p>A paragraph.</text:p>` +
 		`<draw:frame><draw:image xlink:href="Pictures/image.png"/></draw:frame>` +
@@ -250,7 +250,7 @@ func odtWithPicture(t *testing.T) []byte {
 	})
 }
 
-func epubWithPicture(t *testing.T) []byte {
+func epubWithPicture(t testing.TB) []byte {
 	chapter := `<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml">` +
 		`<head><title>Chapter</title></head><body><h1>Chapter</h1><p>A paragraph.</p>` +
 		`<img src="../images/image.png" alt="Diagram"/></body></html>`
@@ -268,14 +268,14 @@ func epubWithPicture(t *testing.T) []byte {
 	})
 }
 
-func htmlWithDataURI(t *testing.T) []byte {
+func htmlWithDataURI(t testing.TB) []byte {
 	t.Helper()
 	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(onePixelPNG)
 	return []byte(`<html><head><title>Page</title></head><body><h1>Page</h1>` +
 		`<p>A paragraph.</p><img src="` + uri + `" alt="Diagram"></body></html>`)
 }
 
-func rtfWithPicture(t *testing.T) []byte {
+func rtfWithPicture(t testing.TB) []byte {
 	t.Helper()
 	return []byte(`{\rtf1\ansi\ansicpg1252\uc1{\fonttbl{\f0\froman Times;}}` +
 		`\pard Before {\pict\pngblip\picw1\pich1 ` + hex.EncodeToString(onePixelPNG) + `} after\par }`)
