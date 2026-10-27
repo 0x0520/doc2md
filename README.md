@@ -32,6 +32,17 @@ A file whose extension is unknown or missing is identified by its leading bytes,
 so `.aspx`, `.config` or extensionless uploads still convert. A known extension
 always wins over content sniffing.
 
+Across formats the output follows one set of conventions:
+
+- Footnotes and endnotes become GFM footnotes: `[^1]` in the text and
+  `[^1]: …` at the end, numbered in reading order.
+- Comments and tracked deletions never appear; tracked insertions are kept.
+- Content controls and text boxes contribute their text; a text box follows the
+  paragraph it is anchored to.
+- A table nested in a cell is flattened into that cell (`in 1, in 2; in 3, in 4`),
+  since a Markdown cell holds one line.
+- Lists are CommonMark: `-` and `1.`, nested under their parent's text column.
+
 ## Install
 
 ```sh
@@ -121,7 +132,10 @@ What does not carry over:
 - No OCR. Scanned PDFs without a text layer produce no text.
 - HTML pictures only when embedded as `data:` URIs.
 - Legacy `.xls` files yield no pictures; Excel 95 (BIFF5) and older are not read.
-- Word footnotes, headers and footers are not read. Speaker notes are left out of presentations.
+- Headers and footers are not read (in a PDF they are dropped as page furniture).
+  Speaker notes are left out of presentations.
+- A PDF keeps a freely positioned text box where it sits on the page, and a table
+  nested in a cell shows as extra columns: the page geometry says nothing more.
 - `.xlsx` and `.xls` cells are formatted with English separators (`2,878.56`) and
   ISO 8601 dates, whatever the author's locale. OpenDocument spreadsheets keep the
   text the authoring application displayed (`2.878,56` from a German Excel).
