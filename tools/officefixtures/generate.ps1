@@ -44,6 +44,101 @@ $bmp.Dispose()
 $Normal = -1; $Heading1 = -2; $Heading2 = -3; $Heading3 = -4; $Title = -63
 $ListBullet = -49; $ListNumber = -50; $CaptionFigure = -1; $CaptionTable = -2
 
+# edge.* holds constructs real documents use and simple readers lose: content
+# controls, notes, text boxes, tracked changes, outline numbering, nested tables.
+function New-WordEdgeCases($word) {
+  $doc = $word.Documents.Add()
+  $sel = $word.Selection
+  function Para($style, $text) {
+    $sel.Range.Style = [int]$style
+    $sel.TypeText($text)
+    $sel.TypeParagraph()
+  }
+
+  Para $Heading1 'Content controls'
+  $sel.Range.Style = $Normal
+  $start = $sel.Range.Start
+  $sel.TypeText('Customer: Example Ltd signed on 2026-03-01.')
+  $sel.TypeParagraph()
+  $null = $doc.ContentControls.Add(1, $doc.Range($start + 10, $start + 21))
+  $t = $doc.Tables.Add($sel.Range, 2, 2)
+  $t.Borders.Enable = $true
+  $t.Cell(1, 1).Range.Text = 'Field'; $t.Cell(1, 2).Range.Text = 'Value'
+  $t.Cell(2, 1).Range.Text = 'Order'; $t.Cell(2, 2).Range.Text = 'A-1042'
+  $cell = $t.Cell(2, 2).Range
+  $null = $doc.ContentControls.Add(1, $doc.Range($cell.Start, $cell.End - 1))
+  $sel.EndKey(6) | Out-Null
+
+  Para $Heading1 'Notes'
+  $sel.Range.Style = $Normal
+  $sel.TypeText('A sentence with a footnote')
+  $null = $doc.Footnotes.Add($sel.Range, [Type]::Missing, 'The footnote text.')
+  $sel.EndKey(6) | Out-Null
+  $sel.TypeText(' and one with an endnote')
+  $null = $doc.Endnotes.Add($sel.Range, [Type]::Missing, 'The endnote text.')
+  $sel.EndKey(6) | Out-Null
+  $sel.TypeText('.')
+  $sel.TypeParagraph()
+
+  Para $Heading1 'Text box'
+  Para $Normal 'The box next to this paragraph holds a note.'
+  $box = $doc.Shapes.AddTextbox(1, 300, 200, 200, 60)
+  $box.TextFrame.TextRange.Text = 'Text inside a text box.'
+
+  Para $Heading1 'Tracked changes'
+  $doc.TrackRevisions = $true
+  $sel.Range.Style = $Normal
+  $sel.TypeText('Kept text, ')
+  $sel.TypeText('inserted text, ')
+  $doc.TrackRevisions = $false
+  $sel.TypeText('removed text, ')
+  $sel.MoveLeft(1, 14, 1) | Out-Null
+  $doc.TrackRevisions = $true
+  $sel.Delete() | Out-Null
+  $doc.TrackRevisions = $false
+  $sel.EndKey(6) | Out-Null
+  $sel.TypeText('end.')
+  $sel.TypeParagraph()
+
+  Para $Heading1 'Outline numbering'
+  $sel.Range.Style = $Normal
+  $start = $sel.Range.Start
+  $sel.TypeText("First level`rSecond level`rThird level`rFirst level again")
+  $r = $doc.Range($start, $sel.Range.End)
+  $r.ListFormat.ApplyListTemplate($word.ListGalleries.Item(3).ListTemplates.Item(1), $false)
+  $r.Paragraphs.Item(2).Range.ListFormat.ListLevelNumber = 2
+  $r.Paragraphs.Item(3).Range.ListFormat.ListLevelNumber = 3
+  $sel.EndKey(6) | Out-Null
+  $sel.TypeParagraph()
+  $sel.Range.ListFormat.RemoveNumbers()
+
+  Para $Heading1 'Nested table'
+  $outer = $doc.Tables.Add($sel.Range, 2, 2)
+  $outer.Borders.Enable = $true
+  $outer.Cell(1, 1).Range.Text = 'Outer A'; $outer.Cell(1, 2).Range.Text = 'Outer B'
+  $outer.Cell(2, 1).Range.Text = 'Outer C'
+  $inner = $outer.Cell(2, 2).Tables.Add($outer.Cell(2, 2).Range, 2, 2)
+  $inner.Cell(1, 1).Range.Text = 'in 1'; $inner.Cell(1, 2).Range.Text = 'in 2'
+  $inner.Cell(2, 1).Range.Text = 'in 3'; $inner.Cell(2, 2).Range.Text = 'in 4'
+  $sel.EndKey(6) | Out-Null
+
+  Para $Heading1 'Comments and symbols'
+  $sel.Range.Style = $Normal
+  $sel.TypeText('A commented word')
+  $null = $doc.Comments.Add($doc.Range($sel.Range.Start - 4, $sel.Range.Start), 'A reviewer comment.')
+  $sel.EndKey(6) | Out-Null
+  $sel.TypeText(' and symbols: € © – “quoted” ½ α β ✓.')
+  $sel.TypeParagraph()
+
+  $base = Join-Path $Out 'edge'
+  $doc.SaveAs2("$base.docx", 16)
+  $doc.SaveAs2("$base.odt", 23)
+  $doc.SaveAs2("$base.rtf", 6)
+  $doc.SaveAs2("$base.html", 10)
+  $doc.ExportAsFixedFormat("$base.pdf", 17)
+  $doc.Close(0)
+}
+
 function New-WordDocuments {
   $word = New-Object -ComObject Word.Application
   $word.Visible = $false
@@ -163,6 +258,8 @@ function New-WordDocuments {
     $big.SaveAs2((Join-Path $Out 'big.docx'), 16)
     $big.ExportAsFixedFormat((Join-Path $Out 'big.pdf'), 17)
     $big.Close(0)
+
+    New-WordEdgeCases $word
   } finally {
     $word.Quit()
     [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word)
