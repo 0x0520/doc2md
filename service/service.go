@@ -139,6 +139,12 @@ func convert(w http.ResponseWriter, r *http.Request, maxBytes int64) {
 			writeErr(w, http.StatusUnsupportedMediaType, errors.New(refusal(name)+wayOut(name)))
 			return
 		}
+		if errors.Is(err, doc2md.ErrEncrypted) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error": "This PDF is password-protected: save a copy without the password and upload it again.",
+			})
+			return
+		}
 		writeErr(w, http.StatusUnprocessableEntity, err)
 		return
 	}

@@ -40,6 +40,9 @@ type Image = docimg.Image
 // the bytes identify a format this module reads.
 var ErrUnsupportedFormat = errors.New("unsupported document format")
 
+// ErrEncrypted is returned (wrapped) for a PDF that needs a user password to open.
+var ErrEncrypted = pdfnative.ErrEncrypted
+
 // Formats that are already text and are returned unchanged. AsciiDoc is not one:
 // its markup is converted.
 var passthroughExts = map[string]bool{
