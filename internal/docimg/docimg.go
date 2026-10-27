@@ -33,7 +33,8 @@ func IsMarker(text string) bool {
 }
 
 // Ext normalises a media type ("image/png"), extension (".png") or bare name to a
-// lowercase extension. It returns "" for types that should not be stored as figures.
+// lowercase extension. It returns "" for types that should not be stored as figures,
+// such as the vector formats EMF and WMF, which browsers cannot show.
 func Ext(mediaTypeOrExt string) string {
 	s := mediaTypeOrExt
 	if i := strings.LastIndexByte(s, '/'); i >= 0 {
@@ -45,15 +46,13 @@ func Ext(mediaTypeOrExt string) string {
 		return "jpg"
 	case "png", "gif", "bmp", "webp", "tiff":
 		return s
+	case "x-ms-bmp":
+		return "bmp"
 	case "tif":
 		return "tiff"
 	// SVG is kept: a diagram drawn as SVG is a figure the consumer can render.
 	case "svg+xml", "svg":
 		return "svg"
-	// EMF and WMF are vector formats that browsers cannot show and nothing here
-	// rasterises.
-	case "x-emf", "emf", "x-wmf", "wmf", "x-ms-bmp":
-		return ""
 	default:
 		return ""
 	}

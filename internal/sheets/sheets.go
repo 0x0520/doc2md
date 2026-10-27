@@ -10,11 +10,13 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/0x0520/doc2md/internal/docimg"
 	"github.com/0x0520/doc2md/internal/mdrender"
-	"github.com/extrame/xls"
 	"github.com/xuri/excelize/v2"
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/unicode"
 )
 
 // ErrUnsupported is returned for a filename extension this package does not read.
@@ -70,7 +72,7 @@ func render(sheets []sheet, headings bool) (string, error) {
 		blocks = append(blocks, body...)
 	}
 	if len(blocks) == 0 {
-		return "", fmt.Errorf("no tabular content found")
+		return "", errors.New("no tabular content found")
 	}
 	return mdrender.Document(blocks), nil
 }
@@ -164,46 +166,17 @@ func xlsxSheetRows(f *excelize.File, name string, maxCells int) ([][]string, err
 	return rows, nil
 }
 
+// xlsToMarkdown converts a legacy BIFF8 workbook (Excel 97 to 2003).
 func xlsToMarkdown(data []byte) (string, error) {
-	wb, err := xls.OpenReader(bytes.NewReader(data), "utf-8")
+	sheets, err := readBIFF8(data)
 	if err != nil {
 		return "", fmt.Errorf("open xls: %w", err)
-	}
-	var sheets []sheet
-	for i := 0; i < wb.NumSheets(); i++ {
-		ws := wb.GetSheet(i)
-		if ws == nil {
-			continue
-		}
-		var rows [][]string
-		for r := 0; r <= int(ws.MaxRow); r++ {
-			row := safeRow(ws, r)
-			if row == nil {
-				rows = append(rows, nil)
-				continue
-			}
-			var cells []string
-			for c := 0; c <= row.LastCol(); c++ {
-				cells = append(cells, row.Col(c))
-			}
-			rows = append(rows, cells)
-		}
-		sheets = append(sheets, sheet{name: ws.Name, rows: rows})
 	}
 	return render(sheets, true)
 }
 
-// safeRow returns nil instead of panicking: the xls library can panic on malformed BIFF rows.
-func safeRow(ws *xls.WorkSheet, i int) (row *xls.Row) {
-	defer func() {
-		if recover() != nil {
-			row = nil
-		}
-	}()
-	return ws.Row(i)
-}
-
 func csvToMarkdown(data []byte) (string, error) {
+	data = decodeText(data)
 	r := csv.NewReader(bytes.NewReader(data))
 	// Rows may have different lengths, and stray quotes are tolerated.
 	r.FieldsPerRecord = -1
@@ -224,18 +197,48 @@ func csvToMarkdown(data []byte) (string, error) {
 	return render([]sheet{{rows: rows}}, false)
 }
 
-// sniffDelimiter guesses the CSV separator (comma, semicolon, tab or pipe) from the
-// first line; ties and lines with none default to comma.
-func sniffDelimiter(data []byte) rune {
-	head := data
-	if i := bytes.IndexByte(head, '\n'); i >= 0 {
-		head = head[:i]
+// decodeText returns data as UTF-8. Excel writes CSV as UTF-8 with a BOM, as
+// UTF-16 with a BOM ("Unicode text"), or in the ANSI code page; text that is not
+// valid UTF-8 is taken as Windows-1252, the code page of most such files.
+func decodeText(data []byte) []byte {
+	switch {
+	case bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}):
+		return data[3:]
+	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}), bytes.HasPrefix(data, []byte{0xFE, 0xFF}):
+		out, err := unicode.UTF16(unicode.LittleEndian, unicode.ExpectBOM).NewDecoder().Bytes(data)
+		if err == nil {
+			return out
+		}
+	case !utf8.Valid(data):
+		if out, err := charmap.Windows1252.NewDecoder().Bytes(data); err == nil {
+			return out
+		}
 	}
-	line := string(head)
+	return data
+}
+
+// sniffDelimiter picks the separator (comma, semicolon, tab or pipe) that occurs
+// most often outside quotes on the first record; ties and none default to comma.
+func sniffDelimiter(data []byte) rune {
+	counts := map[byte]int{}
+	quoted := false
+	for _, c := range data {
+		if c == '"' {
+			quoted = !quoted
+			continue
+		}
+		if quoted {
+			continue
+		}
+		if c == '\n' {
+			break
+		}
+		counts[c]++
+	}
 	best, bestN := ',', 0
-	for _, d := range []rune{',', ';', '\t', '|'} {
-		if n := strings.Count(line, string(d)); n > bestN {
-			best, bestN = d, n
+	for _, d := range []byte{',', ';', '\t', '|'} {
+		if counts[d] > bestN {
+			best, bestN = rune(d), counts[d]
 		}
 	}
 	return best

@@ -82,6 +82,15 @@ func spreadsheetMLToMarkdown(data []byte) (string, error) {
 			if cells >= maxCellsPerSheet {
 				break
 			}
+			// Row Index is 1-based and skips empty rows; the gap counts against the cap.
+			if n, err := strconv.Atoi(r.Index); err == nil && n-1 > len(rows) {
+				gap := n - 1 - len(rows)
+				if gap > maxCellsPerSheet-cells {
+					break
+				}
+				rows = append(rows, make([][]string, gap)...)
+				cells += gap
+			}
 			var row []string
 			nonEmpty, lastStyle, lastValue := 0, "", ""
 			col := 0

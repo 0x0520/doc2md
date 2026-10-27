@@ -23,14 +23,15 @@ func TestMarkerForMatchesTheConvention(t *testing.T) {
 
 func TestExt(t *testing.T) {
 	for in, want := range map[string]string{
-		"image/png":     "png",
-		"image/jpeg":    "jpg",
-		".JPG":          "jpg",
-		"png":           "png",
-		".gif":          "gif",
-		"image/webp":    "webp",
-		".tif":          "tiff",
-		"image/svg+xml": "svg",
+		"image/png":      "png",
+		"image/x-ms-bmp": "bmp",
+		"image/jpeg":     "jpg",
+		".JPG":           "jpg",
+		"png":            "png",
+		".gif":           "gif",
+		"image/webp":     "webp",
+		".tif":           "tiff",
+		"image/svg+xml":  "svg",
 
 		"image/x-emf":     "",
 		".wmf":            "",
