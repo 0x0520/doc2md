@@ -1,3 +1,6 @@
+// Package odf converts OpenDocument text (.odt), spreadsheet (.ods) and
+// presentation (.odp) files to Markdown by walking the package's content.xml
+// with one shared vocabulary: headings, paragraphs, lists and tables.
 package odf
 
 import (
@@ -15,13 +18,19 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// ErrNotODF is returned when the input is not a zip with a content.xml.
 var ErrNotODF = errors.New("not a readable OpenDocument package")
 
 const (
+	// Spreadsheets declare their unused region as one cell or row repeated
+	// thousands of times (e.g. number-columns-repeated="16384"). Empty runs are
+	// only counted, never materialised, and runs with content are capped here.
 	maxRepeat = 4096
 	maxCells  = 1 << 20
 )
 
+// ToMarkdown converts OpenDocument bytes to Markdown and returns the images
+// stored in the package (conventionally under Pictures/).
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -35,7 +44,14 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: %v", ErrNotODF, err)
 	}
-	p := &parser{zr: zr}
+	p := &parser{zr: zr, st: newStyles()}
+	// styles.xml holds the named styles; content.xml adds the automatic ones.
+	if sf := zipx.Find(zr, "styles.xml"); sf != nil {
+		if sb, err := zipx.ReadEntry(sf); err == nil {
+			p.st.scan(sb)
+		}
+	}
+	p.st.scan(content)
 	blocks := p.walk(content)
 	if len(blocks) == 0 {
 		return "", nil, ErrNotODF
@@ -43,8 +59,13 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return mdrender.Document(blocks), p.images, nil
 }
 
+// nsDrawing is the namespace name of the drawing vocabulary. Documents bind it
+// to the prefix "draw" but the URI says "drawing"; ns() yields the URI segment,
+// which is what must be matched, since prefixes are arbitrary.
 const nsDrawing = "drawing"
 
+// ns returns the name segment of an element's namespace URI
+// ("urn:oasis:names:tc:opendocument:xmlns:<name>:1.0"), e.g. "text" or "table".
 func ns(n xml.Name) string {
 	if i := strings.LastIndex(n.Space, ":"); i > 0 {
 		if j := strings.LastIndex(n.Space[:i], ":"); j >= 0 {
@@ -54,6 +75,7 @@ func ns(n xml.Name) string {
 	return n.Space
 }
 
+// attr returns the attribute with the given local name; space "" matches any namespace.
 func attr(e xml.StartElement, space, local string) string {
 	for _, a := range e.Attr {
 		if a.Name.Local == local && (space == "" || ns(a.Name) == space) {
@@ -63,19 +85,244 @@ func attr(e xml.StartElement, space, local string) string {
 	return ""
 }
 
+// paraStyle is the part of a paragraph style that matters here.
+type paraStyle struct{ display, parent, list string }
+
+// setting is a character property a style may set, clear or leave to its parent.
+type setting uint8
+
+const (
+	unset setting = iota
+	on
+	off
+)
+
+// textStyle is the emphasis a character style sets; unset properties come from its parent.
+type textStyle struct {
+	parent               string
+	bold, italic, strike setting
+}
+
+// styles holds the paragraph and character styles and, per list style, which
+// levels are numbered.
+type styles struct {
+	paras map[string]paraStyle
+	texts map[string]*textStyle
+	lists map[string]map[int]bool
+}
+
+func newStyles() *styles {
+	return &styles{
+		paras: map[string]paraStyle{},
+		texts: map[string]*textStyle{},
+		lists: map[string]map[int]bool{},
+	}
+}
+
+// scan reads paragraph, character and list styles from styles.xml, or from the
+// automatic styles at the start of content.xml, where it stops at the document body.
+func (s *styles) scan(data []byte) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	var cur map[int]bool
+	var text *textStyle // the character style being read
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return
+		}
+		if e, ok := tok.(xml.EndElement); ok && ns(e.Name) == "style" && e.Name.Local == "style" {
+			text = nil
+		}
+		t, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch ns(t.Name) {
+		case "office":
+			if t.Name.Local == "body" {
+				return
+			}
+		case "style":
+			switch t.Name.Local {
+			case "style":
+				switch attr(t, "style", "family") {
+				case "paragraph":
+					s.paras[attr(t, "style", "name")] = paraStyle{
+						display: attr(t, "style", "display-name"),
+						parent:  attr(t, "style", "parent-style-name"),
+						list:    attr(t, "style", "list-style-name"),
+					}
+				case "text":
+					text = &textStyle{parent: attr(t, "style", "parent-style-name")}
+					s.texts[attr(t, "style", "name")] = text
+				}
+			case "text-properties":
+				if text != nil {
+					// The fo: namespace URI does not have the shape ns() parses, so match any.
+					text.bold = weight(attr(t, "", "font-weight"))
+					text.italic = fontStyle(attr(t, "", "font-style"))
+					text.strike = lineThrough(attr(t, "style", "text-line-through-style"))
+				}
+			}
+		case "text":
+			switch t.Name.Local {
+			case "list-style":
+				cur = map[int]bool{}
+				s.lists[attr(t, "style", "name")] = cur
+			// An empty num-format means the level shows no number.
+			case "list-level-style-number":
+				if lvl, err := strconv.Atoi(attr(t, "text", "level")); err == nil && cur != nil {
+					cur[lvl] = attr(t, "style", "num-format") != ""
+				}
+			}
+		}
+	}
+}
+
+func weight(v string) setting {
+	switch v {
+	case "":
+		return unset
+	case "bold":
+		return on
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 700 {
+		return on
+	}
+	return off
+}
+
+func fontStyle(v string) setting {
+	switch v {
+	case "":
+		return unset
+	case "italic", "oblique":
+		return on
+	}
+	return off
+}
+
+func lineThrough(v string) setting {
+	switch v {
+	case "":
+		return unset
+	case "none":
+		return off
+	}
+	return on
+}
+
+// emphasis resolves the emphasis of a character style on top of base, the
+// emphasis of the surrounding text: the style's own settings win over its
+// parents', and what none sets is inherited. The chain is followed at most 10
+// steps to survive cycles.
+func (s *styles) emphasis(name string, base mdrender.Emphasis) mdrender.Emphasis {
+	var bold, italic, strike setting
+	for i := 0; name != "" && i < 10; i++ {
+		ts, ok := s.texts[name]
+		if !ok {
+			break
+		}
+		bold, italic, strike = first(bold, ts.bold), first(italic, ts.italic), first(strike, ts.strike)
+		name = ts.parent
+	}
+	return mdrender.Emphasis{
+		Bold:   pick(bold, base.Bold),
+		Italic: pick(italic, base.Italic),
+		Strike: pick(strike, base.Strike),
+	}
+}
+
+// first returns a unless it is unset.
+func first(a, b setting) setting {
+	if a != unset {
+		return a
+	}
+	return b
+}
+
+// pick applies a setting to an inherited value.
+func pick(s setting, inherited bool) bool {
+	if s == unset {
+		return inherited
+	}
+	return s == on
+}
+
+// isTitle reports whether a paragraph style is, or derives from, the built-in
+// Title style. Word writes the localised name, so "Titel" counts too. The parent
+// chain is followed at most 10 steps to survive cycles.
+func (s *styles) isTitle(name string) bool {
+	for i := 0; name != "" && i < 10; i++ {
+		ps, known := s.paras[name]
+		for _, n := range []string{name, ps.display} {
+			if n = strings.ToLower(n); n == "title" || n == "titel" {
+				return true
+			}
+		}
+		if !known {
+			return false
+		}
+		name = ps.parent
+	}
+	return false
+}
+
+// listStyle returns the list style of a paragraph in a list: that of the nearest
+// enclosing text:list naming one, else the one its paragraph style names.
+func (s *styles) listStyle(stack []string, paragraph string) string {
+	if n := len(stack); n > 0 && stack[n-1] != "" {
+		return stack[n-1]
+	}
+	for i := 0; paragraph != "" && i < 10; i++ {
+		ps, known := s.paras[paragraph]
+		if !known {
+			return ""
+		}
+		if ps.list != "" {
+			return ps.list
+		}
+		paragraph = ps.parent
+	}
+	return ""
+}
+
+// frame is an open draw:frame. title marks a slide's title placeholder, whose
+// paragraphs are headings. object is set once the frame holds a table or an
+// embedded object, after which a draw:image in it is only the replacement
+// picture the producer stores for that object.
+type frame struct{ title, object bool }
+
+// parser accumulates blocks during a single walk of content.xml. sheets is set
+// for spreadsheets (each table is a named sheet and gets a heading; in text
+// documents table names like "Table1" are internal labels). lists holds the
+// list style name of each open text:list, frames the open draw:frames. page
+// counts slides or sheets so images can record where they stood. titles are the
+// indices of the blocks written in the Title style.
 type parser struct {
-	blocks     []mdrender.Block
-	listDepth  int
-	sheets     bool
-	titleFrame bool
-	zr         *zip.Reader
-	page       int
-	seq        int
-	total      int
-	images     []docimg.Image
+	blocks []mdrender.Block
+	titles []int
+	lists  []string
+	frames []frame
+	// cellImages holds the markers of pictures anchored in table cells; a marker in the
+	// cell text would add a bogus column or row, so they follow the table instead.
+	cellImages []string
+	inTable    bool
+	// notes are the texts of footnotes and endnotes in order of reference; boxes hold
+	// paragraphs of text boxes, written after the paragraph or table they are anchored in.
+	notes  []string
+	boxes  []string
+	st     *styles
+	sheets bool
+	zr     *zip.Reader
+	page   int
+	seq    int
+	total  int
+	images []docimg.Image
 }
 
 func (p *parser) walk(content []byte) []mdrender.Block {
+	defer p.shiftHeadings()
 	dec := xml.NewDecoder(bytes.NewReader(content))
 	for {
 		tok, err := dec.Token()
@@ -87,61 +334,115 @@ func (p *parser) walk(content []byte) []mdrender.Block {
 			p.start(dec, t)
 		case xml.EndElement:
 			switch {
-			case ns(t.Name) == "text" && t.Name.Local == "list":
-				p.listDepth--
-			case ns(t.Name) == nsDrawing && t.Name.Local == "frame":
-				p.titleFrame = false
+			case ns(t.Name) == "text" && t.Name.Local == "list" && len(p.lists) > 0:
+				p.lists = p.lists[:len(p.lists)-1]
+			case ns(t.Name) == nsDrawing && t.Name.Local == "frame" && len(p.frames) > 0:
+				p.frames = p.frames[:len(p.frames)-1]
 			}
 		}
 	}
+	// GFM footnote definitions close the document; one sequence for footnotes and endnotes.
+	for i, n := range p.notes {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: fmt.Sprintf("[^%d]: %s", i+1, n)})
+	}
 	return p.blocks
+}
+
+// shiftHeadings applies the DOCX reader's rule: Title is "#" and, when the
+// document has one, the real headings move one level down.
+func (p *parser) shiftHeadings() {
+	if len(p.titles) == 0 {
+		return
+	}
+	isTitle := map[int]bool{}
+	for _, i := range p.titles {
+		isTitle[i] = true
+	}
+	for i := range p.blocks {
+		if p.blocks[i].Kind == mdrender.Heading && !isTitle[i] {
+			p.blocks[i].Level++
+		}
+	}
 }
 
 func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 	switch ns(t.Name) {
 	case "office":
-		if t.Name.Local == "spreadsheet" {
+		switch t.Name.Local {
+		case "spreadsheet":
 			p.sheets = true
+		// Comments carry the reviewer's name and date; they are never output.
+		case "annotation", "annotation-end":
+			_ = dec.Skip()
+		}
+	case "presentation":
+		// Speaker notes are not slide content; the PPTX reader leaves them out too.
+		if t.Name.Local == "notes" {
+			_ = dec.Skip()
 		}
 	case nsDrawing:
 		switch t.Name.Local {
+		// presentation:class="title" marks the slide's title placeholder.
 		case "frame":
-			p.titleFrame = attr(t, "presentation", "class") == "title"
+			p.frames = append(p.frames, frame{title: attr(t, "presentation", "class") == "title"})
 		case "page":
 			p.page++
+		case "object", "object-ole":
+			p.markObject()
 		case "image":
-			if mk := p.picture(attr(t, "", "href")); mk != "" {
+			if mk := p.imageMarker(t); mk != "" {
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: mk})
 			}
 		}
 	case "text":
 		switch t.Name.Local {
 		case "h":
+			defer p.flushBoxes()
 			level, _ := strconv.Atoi(attr(t, "text", "outline-level"))
 			if level < 1 {
 				level = 1
 			}
-			if txt := elemText(dec); txt != "" {
+			if txt := p.inline(dec, false); txt != "" {
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: level, Text: txt})
 			}
 		case "p":
-			txt := elemText(dec)
+			defer p.flushBoxes()
+			style := attr(t, "text", "style-name")
+			// Headings carry no emphasis; in a list a title style does not make a heading.
+			heading := len(p.lists) == 0 && (p.inTitleFrame() || p.st.isTitle(style))
+			txt := p.inline(dec, !heading)
 			if txt == "" {
 				return
 			}
 			switch {
-			case p.listDepth > 0:
+			case len(p.lists) > 0:
+				marker := "- "
+				if p.st.lists[p.st.listStyle(p.lists, style)][len(p.lists)] {
+					marker = "1. "
+				}
 				p.blocks = append(p.blocks, mdrender.Block{
 					Kind: mdrender.List,
-					Text: strings.Repeat("  ", p.listDepth-1) + "- " + txt,
+					Text: strings.Repeat("  ", len(p.lists)-1) + marker + txt,
 				})
-			case p.titleFrame:
+			case p.inTitleFrame():
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: 2, Text: txt})
+			case p.st.isTitle(style):
+				p.titles = append(p.titles, len(p.blocks))
+				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: 1, Text: txt})
 			default:
 				p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: txt})
 			}
 		case "list":
-			p.listDepth++
+			// A nested list without a style continues the style of its parent.
+			name := attr(t, "text", "style-name")
+			if name == "" && len(p.lists) > 0 {
+				name = p.lists[len(p.lists)-1]
+			}
+			p.lists = append(p.lists, name)
+		// The table of contents is generated text with page numbers. Deleted text
+		// lives in the tracked changes, which are not part of the document's text.
+		case "table-of-content", "tracked-changes":
+			_ = dec.Skip()
 		}
 	case "table":
 		if t.Name.Local != "table" {
@@ -151,7 +452,12 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 		if p.sheets {
 			p.page++
 		}
-		grid := readTable(dec)
+		p.markObject()
+		p.inTable = true
+		grid := p.readTable(dec)
+		p.inTable = false
+		defer p.flushBoxes()
+		defer p.flushCellImages()
 		grid = mdrender.NormalizeGrid(grid)
 		if len(grid) == 0 {
 			return
@@ -163,9 +469,45 @@ func (p *parser) start(dec *xml.Decoder, t xml.StartElement) {
 	}
 }
 
-func elemText(dec *xml.Decoder) string {
-	var b strings.Builder
+func (p *parser) inTitleFrame() bool {
+	return len(p.frames) > 0 && p.frames[len(p.frames)-1].title
+}
+
+// markObject records that the innermost frame holds a table or an object.
+func (p *parser) markObject() {
+	if n := len(p.frames); n > 0 {
+		p.frames[n-1].object = true
+	}
+}
+
+// imageMarker registers the draw:image t and returns its marker, or "" if it is
+// not a picture of its own.
+func (p *parser) imageMarker(t xml.StartElement) string {
+	if n := len(p.frames); n > 0 && p.frames[n-1].object {
+		return ""
+	}
+	// href is matched without namespace: xlink's URI does not have the OpenDocument
+	// shape ns() parses, and draw:image has no other href attribute.
+	return p.picture(attr(t, "", "href"))
+}
+
+// textState is the formatting in force at a point of running text.
+type textState struct {
+	em   mdrender.Emphasis
+	link *mdrender.Link
+}
+
+// inline returns the text of the element just opened, consuming it through its
+// end tag, with a marker where an image stands. Spans and links become
+// **bold**, _italic_, ~~strike~~ and [text](url) when format is set; links alone
+// otherwise. Space, tab, line-break and nested paragraph elements become one
+// space, since the result is a single Markdown line.
+func (p *parser) inline(dec *xml.Decoder, format bool) string {
+	var b mdrender.Inline
+	var cur textState
+	var stack []textState // the state outside each open element
 	depth := 1
+	open := len(p.frames)
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -173,25 +515,181 @@ func elemText(dec *xml.Decoder) string {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if p.special(dec, t, &b) {
+				continue
+			}
 			depth++
-			if ns(t.Name) == "text" {
+			stack = append(stack, cur)
+			switch ns(t.Name) {
+			case "text":
 				switch t.Name.Local {
-				case "s", "tab", "line-break":
-					b.WriteString(" ")
+				case "s", "tab", "line-break", "p", "h":
+					b.Add(" ", cur.em, cur.link)
+				case "span":
+					cur.em = p.st.emphasis(attr(t, "text", "style-name"), cur.em)
+				case "a":
+					if url := linkTarget(attr(t, "", "href")); url != "" {
+						cur.link = &mdrender.Link{URL: url}
+					}
+				}
+			case nsDrawing:
+				switch t.Name.Local {
+				case "frame":
+					p.frames = append(p.frames, frame{})
+				case "object", "object-ole":
+					p.markObject()
+				case "image":
+					if mk := p.imageMarker(t); mk != "" {
+						if p.inTable {
+							p.cellImages = append(p.cellImages, mk)
+						} else {
+							b.Add(" "+mk+" ", mdrender.Emphasis{}, cur.link)
+						}
+					}
 				}
 			}
 		case xml.EndElement:
-			if depth--; depth == 0 {
-				return strings.Join(strings.Fields(b.String()), " ")
+			if ns(t.Name) == nsDrawing && t.Name.Local == "frame" && len(p.frames) > open {
+				p.frames = p.frames[:len(p.frames)-1]
 			}
+			if depth--; depth == 0 {
+				return strings.Join(strings.Fields(b.Render(format)), " ")
+			}
+			cur, stack = stack[len(stack)-1], stack[:len(stack)-1]
 		case xml.CharData:
-			b.Write(t)
+			b.Add(string(t), cur.em, cur.link)
 		}
 	}
-	return strings.Join(strings.Fields(b.String()), " ")
+	p.frames = p.frames[:open]
+	return strings.Join(strings.Fields(b.Render(format)), " ")
 }
 
-func readTable(dec *xml.Decoder) [][]string {
+// special handles the elements inside running text that are not part of it,
+// that leave the paragraph or that nest a document structure. It reports whether
+// it consumed the element through its end tag.
+func (p *parser) special(dec *xml.Decoder, t xml.StartElement, b *mdrender.Inline) bool {
+	switch ns(t.Name) {
+	case "office":
+		if t.Name.Local == "annotation" || t.Name.Local == "annotation-end" {
+			_ = dec.Skip()
+			return true
+		}
+	case "text":
+		switch t.Name.Local {
+		case "tracked-changes":
+			_ = dec.Skip()
+			return true
+		case "note":
+			b.Add(p.note(dec), mdrender.Emphasis{}, nil)
+			return true
+		}
+	case "table":
+		// A nested table is flattened into its cell.
+		if t.Name.Local == "table" {
+			p.markObject()
+			if txt := p.flatTable(dec); txt != "" {
+				b.Add(" "+txt+" ", mdrender.Emphasis{}, nil)
+			}
+			return true
+		}
+	case nsDrawing:
+		if t.Name.Local == "text-box" {
+			p.textBox(dec)
+			return true
+		}
+	}
+	return false
+}
+
+// note reads a footnote or endnote, consuming it through its end tag, records its
+// text and returns the reference that stands in the paragraph. The citation label
+// inside the note is the producer's own numbering and is ignored.
+func (p *parser) note(dec *xml.Decoder) string {
+	idx := len(p.notes)
+	p.notes = append(p.notes, "") // reserve the number before nested content is read
+	var parts []string
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if ns(t.Name) == "text" && (t.Name.Local == "p" || t.Name.Local == "h") {
+				if txt := p.inline(dec, true); txt != "" {
+					parts = append(parts, txt)
+				}
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+	p.notes[idx] = strings.Join(parts, " ")
+	return fmt.Sprintf("[^%d]", idx+1)
+}
+
+// textBox reads the paragraphs of a text box, consuming it through its end tag.
+// They are queued to follow the paragraph the box is anchored in: floating text
+// has no place in the middle of a sentence.
+func (p *parser) textBox(dec *xml.Decoder) {
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if ns(t.Name) == "text" && (t.Name.Local == "p" || t.Name.Local == "h") {
+				if txt := p.inline(dec, true); txt != "" {
+					p.boxes = append(p.boxes, txt)
+				}
+				continue
+			}
+			if ns(t.Name) == "table" && t.Name.Local == "table" {
+				if txt := p.flatTable(dec); txt != "" {
+					p.boxes = append(p.boxes, txt)
+				}
+				continue
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
+}
+
+// flatTable reads a table, consuming it through its end tag, and returns it as
+// one line: rows joined by "; ", cells by ", ".
+func (p *parser) flatTable(dec *xml.Decoder) string {
+	var rows []string
+	for _, r := range p.readTable(dec) {
+		var cells []string
+		for _, c := range r {
+			if c != "" {
+				cells = append(cells, c)
+			}
+		}
+		if len(cells) > 0 {
+			rows = append(rows, strings.Join(cells, ", "))
+		}
+	}
+	return strings.Join(rows, "; ")
+}
+
+// flushBoxes writes the queued text box paragraphs.
+func (p *parser) flushBoxes() {
+	for _, txt := range p.boxes {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: txt})
+	}
+	p.boxes = nil
+}
+
+// readTable reads the rows of a table, consuming it through its end tag.
+func (p *parser) readTable(dec *xml.Decoder) [][]string {
 	var grid [][]string
 	cells := 0
 	depth := 1
@@ -203,15 +701,16 @@ func readTable(dec *xml.Decoder) [][]string {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if ns(t.Name) == "table" && t.Name.Local == "table-row" {
-				row, n := readRow(dec)
-				cells += n
+				row := p.readRow(dec)
 				rep := repeat(t, "number-rows-repeated")
+				// A row repeated over the unused region has no content and is not worth repeating.
 				if len(row) == 0 {
 					continue
 				}
+				// Only rows that are kept count towards the cap.
 				for k := 0; k < rep && cells < maxCells; k++ {
 					grid = append(grid, row)
-					cells += n
+					cells += len(row)
 				}
 				continue
 			}
@@ -225,7 +724,9 @@ func readTable(dec *xml.Decoder) [][]string {
 	return grid
 }
 
-func readRow(dec *xml.Decoder) ([]string, int) {
+// readRow reads one row. Empty cells only advance the column position, which
+// keeps the unused region from expanding.
+func (p *parser) readRow(dec *xml.Decoder) []string {
 	var row []string
 	col := 0
 	depth := 1
@@ -238,7 +739,7 @@ func readRow(dec *xml.Decoder) ([]string, int) {
 		case xml.StartElement:
 			if ns(t.Name) == "table" && (t.Name.Local == "table-cell" || t.Name.Local == "covered-table-cell") {
 				rep := repeat(t, "number-columns-repeated")
-				txt := elemText(dec)
+				txt := p.inline(dec, true)
 				if txt == "" {
 					col += rep
 					continue
@@ -255,13 +756,15 @@ func readRow(dec *xml.Decoder) ([]string, int) {
 			depth++
 		case xml.EndElement:
 			if depth--; depth == 0 {
-				return row, len(row)
+				return row
 			}
 		}
 	}
-	return row, len(row)
+	return row
 }
 
+// repeat reads a repeat-count attribute, clamped to maxRepeat: large values are
+// layout artifacts for "the rest of the sheet", not content.
 func repeat(t xml.StartElement, name string) int {
 	n, err := strconv.Atoi(attr(t, "table", name))
 	if err != nil || n < 1 {
@@ -273,10 +776,10 @@ func repeat(t xml.StartElement, name string) int {
 	return n
 }
 
-const maxImageBytes = 128 << 20
-
+// picture registers the package entry named by href and returns its marker, or
+// "" if it is missing, external or in an unsupported format.
 func (p *parser) picture(href string) string {
-	if href == "" || p.zr == nil || p.total >= maxImageBytes {
+	if href == "" || p.zr == nil || p.total >= docimg.MaxTotalBytes {
 		return ""
 	}
 	if strings.Contains(href, "://") {
@@ -299,4 +802,12 @@ func (p *parser) picture(href string) string {
 	p.seq++
 	p.images = append(p.images, docimg.Image{Seq: p.seq, Page: p.page, Bytes: b, Ext: ext})
 	return docimg.MarkerFor(p.seq)
+}
+
+// flushCellImages emits the markers collected from the table just read.
+func (p *parser) flushCellImages() {
+	for _, mk := range p.cellImages {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: mk})
+	}
+	p.cellImages = nil
 }

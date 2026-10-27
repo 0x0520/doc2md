@@ -1,3 +1,6 @@
+// Package htmldoc converts HTML to Markdown structurally: headings, lists and
+// tables map to their Markdown forms and presentation-only markup is dropped.
+// It uses the tolerant HTML5 parser, so malformed input yields a tree, not an error.
 package htmldoc
 
 import (
@@ -12,30 +15,44 @@ import (
 	"github.com/0x0520/doc2md/internal/mdrender"
 )
 
+// ErrNoContent is returned when a page has no text outside its scaffolding.
 var ErrNoContent = errors.New("no content in HTML document")
 
+// dropped lists elements whose subtree is never document text (scripts, styling,
+// navigation, controls); the whole subtree is skipped.
 var dropped = map[atom.Atom]bool{
 	atom.Script: true, atom.Style: true, atom.Noscript: true, atom.Template: true,
 	atom.Head: true, atom.Nav: true, atom.Svg: true, atom.Iframe: true,
 	atom.Button: true, atom.Form: true, atom.Select: true, atom.Textarea: true,
 }
 
+// ToMarkdown converts HTML to Markdown and extracts images given as base64
+// data: URIs. Images referencing separate files are not resolved.
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	sink := NewDataSink()
 	md, err := ToMarkdownWith(data, sink)
 	return md, sink.Images(), err
 }
 
+// ToMarkdownWith is ToMarkdown with a caller-supplied ImageSink, so a container
+// format (EPUB) can resolve images stored as sibling entries.
 func ToMarkdownWith(data []byte, sink ImageSink) (string, error) {
 	if sink == nil {
 		sink = noImages{}
 	}
-	root, err := html.Parse(bytes.NewReader(data))
+	root, err := html.Parse(bytes.NewReader(toUTF8(data)))
 	if err != nil {
 		return "", err
 	}
+	notes := prepareWord(root, sink)
 	var blocks []mdrender.Block
 	walk(root, &blocks, sink)
+	promoteTitle(blocks)
+	for _, def := range notes {
+		blocks = append(blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: def})
+	}
+	// Skip the <title> when the body already opens with the same heading; every
+	// EPUB chapter repeats it in <head> and <h1>.
 	if t := findTitle(root); t != "" && !samePhrase(t, firstHeading(blocks)) {
 		blocks = append([]mdrender.Block{{Kind: mdrender.Heading, Level: 1, Text: t}}, blocks...)
 	}
@@ -44,9 +61,11 @@ func ToMarkdownWith(data []byte, sink ImageSink) (string, error) {
 	if md == "" {
 		return "", ErrNoContent
 	}
-	return md, nil
+	// One trailing newline, as every other reader ends.
+	return md + "\n", nil
 }
 
+// firstHeading returns the first heading's text; only the first counts as the document's name.
 func firstHeading(blocks []mdrender.Block) string {
 	for _, b := range blocks {
 		if b.Kind == mdrender.Heading {
@@ -56,16 +75,17 @@ func firstHeading(blocks []mdrender.Block) string {
 	return ""
 }
 
+// samePhrase compares case- and whitespace-insensitively; two empty strings do not match.
 func samePhrase(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	return strings.EqualFold(collapse(a), collapse(b))
+	return strings.EqualFold(Collapse(a), Collapse(b))
 }
 
 func findTitle(n *html.Node) string {
 	if n.Type == html.ElementNode && n.DataAtom == atom.Title {
-		return collapse(text(n))
+		return Collapse(text(n))
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if t := findTitle(c); t != "" {
@@ -75,17 +95,20 @@ func findTitle(n *html.Node) string {
 	return ""
 }
 
+// walk emits block-level structure; inline content is left to inlineText.
 func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
+	var indents []float64 // indentation stack of the Word list run being read
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type != html.ElementNode {
 			if c.Type == html.TextNode {
-				if s := collapse(c.Data); s != "" {
+				// Bare text outside any block element is still content.
+				if s := Collapse(c.Data); s != "" {
 					*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: s})
 				}
 			}
 			continue
 		}
-		if dropped[c.DataAtom] {
+		if dropped[c.DataAtom] || isWordTOC(c) {
 			continue
 		}
 		switch c.DataAtom {
@@ -98,6 +121,21 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 				})
 			}
 		case atom.P, atom.Blockquote, atom.Dd, atom.Dt, atom.Figcaption, atom.Caption:
+			if c.DataAtom == atom.P {
+				if isWordTitle(c) {
+					if s := inlineText(c, sink); s != "" {
+						*out = append(*out, mdrender.Block{Kind: mdrender.Heading, Level: titleLevel, Text: s})
+					}
+					continue
+				}
+				if n := len(*out); n == 0 || (*out)[n-1].Kind != mdrender.List {
+					indents = nil
+				}
+				if item, ok := wordListItem(c, sink, &indents); ok {
+					*out = append(*out, item)
+					continue
+				}
+			}
 			if s := inlineText(c, sink); s != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: s})
 			}
@@ -113,10 +151,12 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 			} else if t := renderTable(c, sink); t != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Table_, Text: t})
 			}
+		// A standalone image becomes its own block. If the sink cannot resolve it,
+		// alt text is used: a marker pointing at no bytes is worse than none.
 		case atom.Img:
-			if m := sink.Marker(attr(c, "src")); m != "" {
+			if m := sink.Marker(Attr(c, "src")); m != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: m})
-			} else if alt := attr(c, "alt"); alt != "" {
+			} else if alt := Attr(c, "alt"); alt != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: alt})
 			}
 		case atom.Br, atom.Hr, atom.Input:
@@ -126,6 +166,8 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 	}
 }
 
+// emitList renders a list with nesting by indentation. An item's text and its
+// nested list are separate blocks so the item text is not swallowed.
 func emitList(list *html.Node, depth int, out *[]mdrender.Block, sink ImageSink) {
 	marker := "- "
 	if list.DataAtom == atom.Ol {
@@ -149,40 +191,74 @@ func emitList(list *html.Node, depth int, out *[]mdrender.Block, sink ImageSink)
 	}
 }
 
+// layoutTable reports whether a table is page layout rather than data: some
+// cell holds block content, which a one-line pipe-table cell would drop.
+// layoutTable reports whether a table is page layout rather than data: some
+// cell holds block content, which a one-line pipe-table cell would drop. In a
+// grid of at least two rows and columns a nested table alone does not make it
+// layout: it is flattened into its cell, since the outer table is still data.
 func layoutTable(tbl *html.Node) bool {
-	found := false
-	eachCell(tbl, func(cell *html.Node) {
-		if !found && hasBlocks(cell) {
-			found = true
+	rows := ownRows(tbl)
+	grid := len(rows) >= 2
+	for _, row := range rows {
+		for _, cell := range row {
+			if hasBlocks(cell, !grid || len(row) < 2) {
+				return true
+			}
 		}
-	})
-	return found
+	}
+	return false
 }
 
-func eachCell(tbl *html.Node, visit func(*html.Node)) {
-	var rows func(*html.Node)
-	rows = func(n *html.Node) {
+// ownRows returns the cells of each of the table's own rows, skipping nested tables.
+func ownRows(tbl *html.Node) [][]*html.Node {
+	var rows [][]*html.Node
+	var collect func(*html.Node)
+	collect = func(n *html.Node) {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			if c.Type != html.ElementNode {
 				continue
 			}
 			switch c.DataAtom {
 			case atom.Tr:
+				var cells []*html.Node
 				for cell := c.FirstChild; cell != nil; cell = cell.NextSibling {
 					if cell.Type == html.ElementNode && (cell.DataAtom == atom.Td || cell.DataAtom == atom.Th) {
-						visit(cell)
+						cells = append(cells, cell)
 					}
 				}
+				rows = append(rows, cells)
 			case atom.Table:
 			default:
-				rows(c)
+				collect(c)
 			}
 		}
 	}
-	rows(tbl)
+	collect(tbl)
+	return rows
 }
 
-func hasBlocks(n *html.Node) bool {
+// flattenTable renders a nested table inside one line of its cell: rows joined
+// by "; ", cells by ", ".
+func flattenTable(tbl *html.Node, sink ImageSink) string {
+	var rows []string
+	for _, cells := range ownRows(tbl) {
+		var parts []string
+		for _, cell := range cells {
+			if s := inlineText(cell, sink); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) > 0 {
+			rows = append(rows, strings.Join(parts, ", "))
+		}
+	}
+	return strings.Join(rows, "; ")
+}
+
+// hasBlocks reports whether n holds block content a pipe-table cell cannot
+// (lists, headings, pre, several paragraphs, and nested tables when tables is set).
+func hasBlocks(n *html.Node, tables bool) bool {
 	paragraphs := 0
 	var look func(*html.Node) bool
 	look = func(n *html.Node) bool {
@@ -191,11 +267,15 @@ func hasBlocks(n *html.Node) bool {
 				continue
 			}
 			switch c.DataAtom {
-			case atom.Ul, atom.Ol, atom.Table, atom.Pre, atom.Blockquote,
+			case atom.Table:
+				if tables {
+					return true
+				}
+			case atom.Ul, atom.Ol, atom.Pre, atom.Blockquote,
 				atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
 				return true
 			case atom.P, atom.Div:
-				if collapse(text(c)) != "" {
+				if Collapse(text(c)) != "" {
 					paragraphs++
 				}
 				if paragraphs > 1 || look(c) {
@@ -212,6 +292,8 @@ func hasBlocks(n *html.Node) bool {
 	return look(n)
 }
 
+// walkLayout emits a layout table in reading order: block cells as blocks,
+// consecutive inline cells of a row joined by " — " into one paragraph.
 func walkLayout(tbl *html.Node, out *[]mdrender.Block, sink ImageSink) {
 	var rows func(*html.Node)
 	rows = func(n *html.Node) {
@@ -236,7 +318,7 @@ func walkLayout(tbl *html.Node, out *[]mdrender.Block, sink ImageSink) {
 				if cell.Type != html.ElementNode || (cell.DataAtom != atom.Td && cell.DataAtom != atom.Th) {
 					continue
 				}
-				if hasBlocks(cell) {
+				if hasBlocks(cell, true) {
 					flush()
 					walk(cell, out, sink)
 					continue
@@ -251,6 +333,8 @@ func walkLayout(tbl *html.Node, out *[]mdrender.Block, sink ImageSink) {
 	rows(tbl)
 }
 
+// renderTable gathers rows from thead/tbody/tfoot alike (nested tables are skipped) and renders through
+// mdrender so tables match those of other formats.
 func renderTable(tbl *html.Node, sink ImageSink) string {
 	var grid [][]string
 	var collect func(*html.Node)
@@ -280,6 +364,7 @@ func renderTable(tbl *html.Node, sink ImageSink) string {
 	return mdrender.Table(mdrender.NormalizeGrid(grid))
 }
 
+// inlineText renders inline content, keeping emphasis, code and links.
 func inlineText(n *html.Node, sink ImageSink) string {
 	var b strings.Builder
 	var add func(*html.Node)
@@ -288,31 +373,38 @@ func inlineText(n *html.Node, sink ImageSink) string {
 			switch {
 			case c.Type == html.TextNode:
 				b.WriteString(c.Data)
-			case c.Type != html.ElementNode || dropped[c.DataAtom]:
+			case c.Type != html.ElementNode || dropped[c.DataAtom] || isMsoIgnore(c):
+			// Nested lists are emitted as blocks by emitList; including them here would duplicate them.
 			case c.DataAtom == atom.Ul || c.DataAtom == atom.Ol:
 			case c.DataAtom == atom.Br:
 				b.WriteString(" ")
+			// Pad cells so adjacent ones do not fuse into one word.
 			case c.DataAtom == atom.Td || c.DataAtom == atom.Th || c.DataAtom == atom.Tr:
 				b.WriteString(" ")
 				add(c)
 				b.WriteString(" ")
+			case c.DataAtom == atom.Table:
+				b.WriteString(" " + flattenTable(c, sink) + " ")
 			case c.DataAtom == atom.Strong || c.DataAtom == atom.B:
 				b.WriteString(wrap(inlineText(c, sink), "**"))
+			case c.DataAtom == atom.Del || c.DataAtom == atom.S || c.DataAtom == atom.Strike:
+				b.WriteString(wrap(inlineText(c, sink), "~~"))
 			case c.DataAtom == atom.Em || c.DataAtom == atom.I:
 				b.WriteString(wrap(inlineText(c, sink), "_"))
 			case c.DataAtom == atom.Code || c.DataAtom == atom.Kbd || c.DataAtom == atom.Samp:
 				b.WriteString(wrap(text(c), "`"))
 			case c.DataAtom == atom.A:
 				label := inlineText(c, sink)
-				if href := attr(c, "href"); href != "" && label != "" && !strings.HasPrefix(href, "javascript:") {
+				if href := Attr(c, "href"); href != "" && label != "" && !mdrender.ActiveScheme(href) {
 					b.WriteString("[" + label + "](" + href + ")")
 				} else {
 					b.WriteString(label)
 				}
+			// The marker is padded so it does not fuse with surrounding words.
 			case c.DataAtom == atom.Img:
-				if m := sink.Marker(attr(c, "src")); m != "" {
+				if m := sink.Marker(Attr(c, "src")); m != "" {
 					b.WriteString(" " + m + " ")
-				} else if alt := attr(c, "alt"); alt != "" {
+				} else if alt := Attr(c, "alt"); alt != "" {
 					b.WriteString(alt)
 				}
 			default:
@@ -321,9 +413,10 @@ func inlineText(n *html.Node, sink ImageSink) string {
 		}
 	}
 	add(n)
-	return collapse(b.String())
+	return Collapse(b.String())
 }
 
+// wrap returns "" for blank text so an empty element leaves no stray markers.
 func wrap(s, with string) string {
 	if strings.TrimSpace(s) == "" {
 		return ""
@@ -347,7 +440,8 @@ func text(n *html.Node) string {
 	return b.String()
 }
 
-func attr(n *html.Node, name string) string {
+// Attr returns the value of the named attribute, or "" if it is absent.
+func Attr(n *html.Node, name string) string {
 	for _, a := range n.Attr {
 		if a.Key == name {
 			return a.Val
@@ -356,4 +450,5 @@ func attr(n *html.Node, name string) string {
 	return ""
 }
 
-func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
+// Collapse joins the whitespace-separated fields of s with single spaces.
+func Collapse(s string) string { return strings.Join(strings.Fields(s), " ") }

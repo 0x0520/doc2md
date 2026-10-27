@@ -91,6 +91,7 @@ func TestConvert_MarkupFormatsAreConverted(t *testing.T) {
 	}
 }
 
+// A recognised extension wins over the content; only unknown names are sniffed.
 func TestConvert_SniffOnlyForUnknownNames(t *testing.T) {
 	page := []byte("<!DOCTYPE html><html><body><h1>Title</h1></body></html>")
 
@@ -117,6 +118,7 @@ func TestConvert_UnsupportedStillErrors(t *testing.T) {
 	}
 }
 
+// The spreadsheet reader dispatches on the name, so the sniffed extension must be passed on.
 func TestConvert_SniffedExtensionReachesTheReader(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -161,6 +163,7 @@ func TestConvert_SniffedExtensionReachesTheReader(t *testing.T) {
 	}
 }
 
+// AsciiDoc has no byte signature, so it converts only when the name says so.
 func TestConvert_UnsignedTextFormatsNeedTheirName(t *testing.T) {
 	adoc := []byte("== Overview\n\nThe café is open.\n")
 	if _, _, err := Convert("", adoc); !errors.Is(err, ErrUnsupportedFormat) {

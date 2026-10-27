@@ -11,18 +11,25 @@ import (
 )
 
 const (
-	cellGapFactor     = 1.5
-	minTableRows      = 2
+	// cellGapFactor is the gap between tokens, in font sizes, that separates table cells.
+	cellGapFactor = 1.5
+	// minTableRows is the number of multi-cell rows that make a table.
+	minTableRows = 2
+	// continuationPitch: a row set closer than this many font sizes to the previous one is a wrapped continuation of it.
 	continuationPitch = 1.5
 )
 
+// cell is a run of tokens on one row between cell-sized gaps.
 type cell struct {
 	startX float64
 	text   string
 	toks   []pdf.Text
 }
 
-func assembleRows(rows [][]pdf.Text, verbatim bool) []line {
+// assembleRows turns rows into lines. Runs of multi-cell rows become one table line
+// (pre set); runs that look like a contents list are dropped unless verbatim. Other
+// rows also get their emphasis and the links of the page.
+func assembleRows(rows [][]pdf.Text, verbatim bool, links []linkArea) []line {
 	cells := make([][]cell, len(rows))
 	tabular := make([]bool, len(rows))
 	for i, r := range rows {
@@ -48,6 +55,7 @@ func assembleRows(rows [][]pdf.Text, verbatim bool) []line {
 					j++
 					continue
 				}
+				// A one-cell row under an inner column is wrapped cell text and stays in the run, unless it is a page number.
 				if len(cells[j]) == 1 && alignsToInner(cells[j][0].startX, innerXs, tol) &&
 					!pageNumRe.MatchString(strings.ToLower(strings.TrimSpace(cells[j][0].text))) {
 					j++
@@ -67,12 +75,15 @@ func assembleRows(rows [][]pdf.Text, verbatim bool) []line {
 				}
 			}
 		}
-		out = append(out, joinLine(rows[i]))
+		ln := joinLine(rows[i])
+		ln.rich, ln.linked, ln.styled = richText(rows[i], links)
+		out = append(out, ln)
 		i++
 	}
 	return out
 }
 
+// innerColXs returns the start positions of all cells but the first.
 func innerColXs(cs []cell) []float64 {
 	xs := make([]float64, 0, len(cs))
 	for _, c := range cs[min(1, len(cs)):] {
@@ -90,12 +101,12 @@ func alignsToInner(x float64, xs []float64, tol float64) bool {
 	return false
 }
 
+// splitCells splits a row into cells at gaps wider than cellGapFactor font sizes.
 func splitCells(row []pdf.Text) []cell {
 	if len(row) == 0 {
 		return nil
 	}
-	toks := append([]pdf.Text(nil), row...)
-	sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
+	toks := byX(row)
 	gap := cellGapFactor * dominantSize(toks)
 
 	var cells []cell
@@ -115,9 +126,12 @@ func splitCells(row []pdf.Text) []cell {
 }
 
 func mkCell(seg []pdf.Text) cell {
-	return cell{startX: seg[0].X, text: strings.TrimSpace(joinLine(seg).text), toks: seg}
+	text, _ := joinText(seg)
+	return cell{startX: seg[0].X, text: strings.TrimSpace(text), toks: seg}
 }
 
+// splitCellAtAnchors splits a cell at word gaps near known column positions, for
+// tables whose columns are set no wider apart than a normal word gap.
 func splitCellAtAnchors(c cell, cols []float64, tol float64) []cell {
 	var out []cell
 	cur := c.toks
@@ -148,6 +162,8 @@ func splitCellAtAnchors(c cell, cols []float64, tol float64) []cell {
 	return out
 }
 
+// wordGapAt returns the index of the token that starts the word gap nearest to x=a
+// (within tol), or -1.
 func wordGapAt(toks []pdf.Text, a, tol float64) int {
 	var span, sumW float64
 	for k := 1; k < len(toks); k++ {
@@ -182,6 +198,8 @@ func wordGapAt(toks []pdf.Text, a, tol float64) int {
 	return best
 }
 
+// buildTable converts a run of rows into a Markdown table line. It returns false if
+// fewer than two columns emerge or the grid ends up empty.
 func buildTable(rows [][]pdf.Text, cells [][]cell) (line, bool) {
 	repFS := dominantSize(rows[0])
 	if repFS == 0 {
@@ -214,6 +232,7 @@ func buildTable(rows [][]pdf.Text, cells [][]cell) (line, bool) {
 		raw[i] = r
 	}
 
+	// tight[i] marks a row set close to the previous one, i.e. a wrapped continuation.
 	tight := make([]bool, len(rows))
 	for i := 1; i < len(rows); i++ {
 		fs := dominantSize(rows[i])
@@ -237,6 +256,8 @@ func buildTable(rows [][]pdf.Text, cells [][]cell) (line, bool) {
 	}, true
 }
 
+// mergeContinuationRows folds wrapped rows into the previous row: tightly spaced rows
+// with an empty first cell, and rows completing a hyphenated first cell.
 func mergeContinuationRows(raw [][]string, tight []bool) [][]string {
 	out := make([][]string, 0, len(raw))
 	for i, r := range raw {
@@ -290,6 +311,8 @@ func rowHasText(r []string) bool {
 	return false
 }
 
+// clusterColumns returns the column start positions: the sorted cell starts, merged
+// within tol. Empty cells count only when at least two align, so stray blanks do not make columns.
 func clusterColumns(cells [][]cell, tol float64) []float64 {
 	var xs, emptyXs []float64
 	for _, rc := range cells {

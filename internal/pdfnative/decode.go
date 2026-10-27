@@ -9,8 +9,12 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
+// maxFontProgram bounds how much of an embedded font stream is read.
 const maxFontProgram = 1 << 24
 
+// buildDecoder maps a font's character codes to text from /Differences, then
+// /ToUnicode (which overrides), then ligature glyphs read from the embedded font.
+// It returns nil if nothing is known, leaving the library's encoding in charge.
 func buildDecoder(font pdf.Font) map[int]string {
 	out := map[int]string{}
 	v := font.V
@@ -27,6 +31,8 @@ func buildDecoder(font pdf.Font) map[int]string {
 	return out
 }
 
+// fillEmbeddedLigatures adds text for ligature glyphs (fi, ffl, ...) of an embedded
+// Type0 font that ToUnicode does not cover. Existing mappings win.
 func fillEmbeddedLigatures(v pdf.Value, out map[int]string) {
 	if v.Key("Subtype").Name() != "Type0" {
 		return
@@ -46,6 +52,7 @@ func fillEmbeddedLigatures(v pdf.Value, out map[int]string) {
 		return
 	}
 	c2g := d0.Key("CIDToGIDMap")
+	// With an identity CIDToGIDMap the code is the glyph id.
 	if c2g.Name() == "Identity" || c2g.IsNull() {
 		for gid, s := range byGID {
 			if _, ok := out[gid]; !ok {
@@ -65,6 +72,7 @@ func fillEmbeddedLigatures(v pdf.Value, out map[int]string) {
 	}
 }
 
+// readFontProgram returns the embedded font file, trying FontFile2 then FontFile3.
 func readFontProgram(fd pdf.Value) []byte {
 	for _, k := range []string{"FontFile2", "FontFile3"} {
 		if ff := fd.Key(k); !ff.IsNull() {
@@ -76,6 +84,7 @@ func readFontProgram(fd pdf.Value) []byte {
 	return nil
 }
 
+// readStream returns the decoded stream bytes up to maxFontProgram; it returns nil on a decoding failure or panic.
 func readStream(v pdf.Value) []byte {
 	defer func() { _ = recover() }()
 	r := v.Reader()
@@ -90,6 +99,7 @@ func readStream(v pdf.Value) []byte {
 	return data
 }
 
+// parseToUnicode fills out from the bfchar and bfrange sections of a ToUnicode CMap (PDF 32000-1 §9.10.3).
 func parseToUnicode(stream pdf.Value, out map[int]string) {
 	defer func() { _ = recover() }()
 	r := stream.Reader()
@@ -117,6 +127,7 @@ func parseToUnicode(stream pdf.Value, out map[int]string) {
 			for i++; i+2 < len(toks) && toks[i] != "endbfrange"; {
 				lo, ok1 := hexTok(toks[i])
 				hi, ok2 := hexTok(toks[i+1])
+				// Reject a malformed or implausibly large range.
 				if !ok1 || !ok2 || hi < lo || hi-lo > 1<<16 {
 					break
 				}
@@ -134,6 +145,7 @@ func parseToUnicode(stream pdf.Value, out map[int]string) {
 					continue
 				}
 				if dst, ok := hexStr(toks[i+2]); ok && dst != "" {
+					// A single destination string counts up in its last character across the range.
 					rs := []rune(dst)
 					last := rs[len(rs)-1]
 					for c := lo; c <= hi; c++ {
@@ -147,6 +159,7 @@ func parseToUnicode(stream pdf.Value, out map[int]string) {
 	}
 }
 
+// lexCMap splits CMap source into tokens, keeping <hex> strings and the [ ] delimiters whole.
 func lexCMap(s string) []string {
 	var toks []string
 	for i := 0; i < len(s); {
@@ -176,6 +189,7 @@ func lexCMap(s string) []string {
 	return toks
 }
 
+// hexTok parses a source code "<XXXX>" of at most two bytes.
 func hexTok(t string) (int, bool) {
 	if len(t) < 3 || t[0] != '<' || t[len(t)-1] != '>' {
 		return 0, false
@@ -191,6 +205,7 @@ func hexTok(t string) (int, bool) {
 	return int(n), true
 }
 
+// hexStr decodes a UTF-16BE destination string "<...>".
 func hexStr(t string) (string, bool) {
 	if len(t) < 2 || t[0] != '<' || t[len(t)-1] != '>' {
 		return "", false
@@ -210,6 +225,8 @@ func hexStr(t string) (string, bool) {
 	return string(utf16.Decode(units)), true
 }
 
+// parseDifferences reads an /Encoding /Differences array: an integer sets the next
+// code, each following glyph name maps the current code and advances it.
 func parseDifferences(d pdf.Value, out map[int]string) {
 	if d.Kind() != pdf.Array {
 		return
@@ -228,6 +245,9 @@ func parseDifferences(d pdf.Value, out map[int]string) {
 	}
 }
 
+// glyphNameToText resolves a glyph name to text: ligature names ("f_i") part by
+// part, uniXXXX and uXXXX forms, single characters, then the table below.
+// It returns "" for unknown names.
 func glyphNameToText(name string) string {
 	if name == "" {
 		return ""
@@ -262,6 +282,7 @@ func glyphNameToText(name string) string {
 	return ""
 }
 
+// glyphNames covers the Adobe glyph names that occur in Latin text; it is not the full list.
 var glyphNames = map[string]string{
 	"space": " ", "exclam": "!", "quotedbl": "\"", "numbersign": "#", "dollar": "$",
 	"percent": "%", "ampersand": "&", "quotesingle": "'", "parenleft": "(", "parenright": ")",

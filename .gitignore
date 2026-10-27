@@ -1,6 +1,8 @@
 /doc2md
 /doc2md.exe
 /dist/
+/tools/officefixtures/out/
 *.test
+*.test.exe
 *.out
 .DS_Store

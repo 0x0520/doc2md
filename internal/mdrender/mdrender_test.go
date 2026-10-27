@@ -90,3 +90,17 @@ func TestDocument_HeadingNormalisation(t *testing.T) {
 		})
 	}
 }
+
+func TestDocumentNumbersLazyOrderedLists(t *testing.T) {
+	item := func(s string) Block { return Block{Kind: List, Text: s} }
+	got := Document([]Block{
+		item("- a"), item("- b"),
+		item("1. one"), item("  - nested"), item("1. two"), item("  1. sub one"), item("  1. sub two"), item("1. three"),
+		{Kind: Paragraph, Text: "between"},
+		item("3. kept"), item("4. as written"),
+	})
+	want := "- a\n- b\n\n1. one\n   - nested\n2. two\n   1. sub one\n   2. sub two\n3. three\n\nbetween\n\n3. kept\n4. as written\n"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}

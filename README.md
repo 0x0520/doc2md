@@ -14,16 +14,16 @@ where headings, tables and reading order matter more than visual fidelity.
 
 | Format | Package | What is kept |
 |---|---|---|
-| `.pdf` | `internal/pdfnative` | reading order across columns, headings from size and weight, tables (including wrapped and cross-page cells), raster figures as `[Image: N]` markers; cover page, table of contents and running headers/footers are dropped |
-| `.docx` `.docm` | `internal/ooxml` | headings from the style outline level (language-independent), font size as a fallback for documents without heading styles, lists, tables, links, pictures |
-| `.pptx` `.pptm` | `internal/ooxml` | slide titles as headings, text boxes, tables, pictures |
+| `.pdf` | `internal/pdfnative` | reading order across columns, headings from size, weight and numbering (slide titles of exported decks included), bullet and numbered lists, tables (including wrapped and cross-page cells), text in form XObjects, raster figures as `[Image: N]` markers; cover page, table of contents and running headers/footers are dropped; password-protected files return `ErrEncrypted` |
+| `.docx` `.docm` | `internal/ooxml` | title and headings from styles (language-independent), font size as a fallback for documents without heading styles, bullet and numbered lists (also through list styles), bold/italic/strikethrough, tables, links, field results such as caption numbers, pictures; the table of contents is dropped |
+| `.pptx` `.pptm` | `internal/ooxml` | slides in presentation order, titles as headings, body placeholders as nested bullet lists, text boxes, tables, pictures |
 | `.xlsx` `.xlsm` | `internal/sheets` | one heading and table per sheet with formatted cell values, pictures after their sheet |
-| `.xls` | `internal/sheets` | legacy BIFF and SpreadsheetML 2003 |
-| `.csv` | `internal/sheets` | delimiter detection (`,` `;` tab `\|`) |
-| `.odt` `.ods` `.odp` | `internal/odf` | OpenDocument text, spreadsheets and presentations, including templates (`.ott` `.ots` `.otp`) |
+| `.xls` | `internal/sheets` | legacy BIFF8 (Excel 97–2003) with formula results, dates and percentages, and SpreadsheetML 2003 |
+| `.csv` | `internal/sheets` | delimiter detection (`,` `;` tab `\|`), UTF-8, UTF-16 and Windows-1252 input |
+| `.odt` `.ods` `.odp` | `internal/odf` | OpenDocument text, spreadsheets and presentations, including templates (`.ott` `.ots` `.otp`): title and headings, bullet and numbered lists, tables, pictures; table of contents and speaker notes dropped |
 | `.epub` | `internal/epub` | chapters in spine order, nested as the navigation document says (EPUB 3 `nav`, EPUB 2 `toc.ncx`) |
-| `.rtf` | `internal/rtf` | headings from outline levels, tables, lists, code pages and Unicode escapes, PNG/JPEG pictures |
-| `.html` `.htm` `.xhtml` | `internal/htmldoc` | headings, tables, lists, links, emphasis, inline `data:` pictures; scripts, styling and navigation dropped |
+| `.rtf` | `internal/rtf` | title and headings from styles and outline levels, tables, bullet and numbered lists, document and font code pages, Unicode escapes, PNG/JPEG pictures; the table of contents is dropped |
+| `.html` `.htm` `.xhtml` | `internal/htmldoc` | headings, tables, lists (including Word's HTML lists), links, emphasis, inline `data:` pictures, any declared charset; scripts, styling, navigation and Word's TOC dropped |
 | `.xml` | `internal/xmldoc` | element tree as headings and labelled values; runs of sibling records as tables |
 | `.adoc` `.asciidoc` | `internal/asciidoc` | sections, tables (`cols=`, spans, `a\|` cells), lists, cross-references, attributes |
 | `.md` `.txt` | | returned unchanged |
@@ -31,6 +31,17 @@ where headings, tables and reading order matter more than visual fidelity.
 A file whose extension is unknown or missing is identified by its leading bytes,
 so `.aspx`, `.config` or extensionless uploads still convert. A known extension
 always wins over content sniffing.
+
+Across formats the output follows one set of conventions:
+
+- Footnotes and endnotes become GFM footnotes: `[^1]` in the text and
+  `[^1]: …` at the end, numbered in reading order.
+- Comments and tracked deletions never appear; tracked insertions are kept.
+- Content controls and text boxes contribute their text; a text box follows the
+  paragraph it is anchored to.
+- A table nested in a cell is flattened into that cell (`in 1, in 2; in 3, in 4`),
+  since a Markdown cell holds one line.
+- Lists are CommonMark: `-` and `1.`, nested under their parent's text column.
 
 ## Install
 
@@ -58,8 +69,11 @@ byte signature (AsciiDoc, CSV) need `-name` when piped.
 import "github.com/0x0520/doc2md"
 
 md, images, err := doc2md.Convert("report.docx", data)
-if errors.Is(err, doc2md.ErrUnsupportedFormat) {
+switch {
+case errors.Is(err, doc2md.ErrUnsupportedFormat):
 	// route to a fallback
+case errors.Is(err, doc2md.ErrEncrypted):
+	// the PDF needs a password
 }
 for _, img := range images {
 	// img.Seq matches the "[Image: N]" marker; img.Page, img.Ext, img.Bytes
@@ -117,7 +131,14 @@ What does not carry over:
 - Only raster figures. Vector drawings (WMF/EMF) are not rasterised; SVG is passed through.
 - No OCR. Scanned PDFs without a text layer produce no text.
 - HTML pictures only when embedded as `data:` URIs.
-- Legacy `.xls` files yield no pictures.
+- Legacy `.xls` files yield no pictures; Excel 95 (BIFF5) and older are not read.
+- Headers and footers are not read (in a PDF they are dropped as page furniture).
+  Speaker notes are left out of presentations.
+- A PDF keeps a freely positioned text box where it sits on the page, and a table
+  nested in a cell shows as extra columns: the page geometry says nothing more.
+- `.xlsx` and `.xls` cells are formatted with English separators (`2,878.56`) and
+  ISO 8601 dates, whatever the author's locale. OpenDocument spreadsheets keep the
+  text the authoring application displayed (`2.878,56` from a German Excel).
 - Spreadsheet pictures are listed after their sheet, not inside cells.
 - Logos and icons repeated across most PDF pages are treated as decoration.
 - AsciiDoc `include::` becomes a link; no other file is read.
@@ -134,7 +155,12 @@ What does not carry over:
 ```sh
 go test ./...
 go test ./internal/pdfnative/ -update-golden
+go test -run '^$' -fuzz FuzzConvert -fuzztime 5m .
+go test -run '^$' -bench Render ./internal/pdfnative/
 ```
+
+`FuzzConvert` feeds arbitrary bytes to every reader and fails on a panic or on
+any input that takes longer than two seconds.
 
 PDF tests come in two layers. Line-level tests build the internal line model
 directly. End-to-end golden tests describe a page layout in Go, render it to a
@@ -143,6 +169,20 @@ real PDF with pdfcpu at test time and compare the Markdown with
 Review golden diffs as part of every change.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## How this project is built
+
+doc2md is developed with [Claude](https://www.anthropic.com/claude), Anthropic's AI
+model, as a coding assistant. Much of the code, tests and documentation is written
+by Claude under the maintainer's supervision: the maintainer sets the direction,
+reviews the changes and decides what is merged. Commits with AI involvement carry a
+`Co-Authored-By: Claude` trailer.
+
+The safeguards do not depend on who wrote a change: every behaviour is covered by
+tests, PDF layout by golden files, all readers are fuzzed against malformed input,
+and conversions are checked against documents produced by the real Office
+applications (`tools/officefixtures`). If you find a bug, please report it like any
+other.
 
 ## License
 

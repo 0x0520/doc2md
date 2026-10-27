@@ -2,6 +2,7 @@ package epub
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"path"
 	"strings"
@@ -9,17 +10,22 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 
+	"github.com/0x0520/doc2md/internal/htmldoc"
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
+// maxNavDepth is the deepest nesting honoured; Markdown has six heading levels.
 const maxNavDepth = 6
 
+// navDepths maps a spine entry's archive name to its depth in the navigation
+// document (1 = top level). Entries the navigation omits are absent and stay at depth 1.
 func navDepths(zr *zip.Reader, base string, p pkg) map[string]int {
 	for _, it := range p.Manifest {
 		if it.Href == "" {
 			continue
 		}
 		switch {
+		// EPUB 3 marks its navigation document with the "nav" property, EPUB 2 by the NCX media type.
 		case strings.Contains(it.Properties, "nav"):
 			if d := depthsFromXHTML(zr, base, it.Href); len(d) > 0 {
 				return d
@@ -45,12 +51,13 @@ func readPart(zr *zip.Reader, base, href string) []byte {
 	return b
 }
 
+// depthsFromXHTML reads an EPUB 3 navigation document; nested <ol> elements give the depth.
 func depthsFromXHTML(zr *zip.Reader, base, href string) map[string]int {
 	raw := readPart(zr, base, href)
 	if raw == nil {
 		return nil
 	}
-	root, err := html.Parse(strings.NewReader(string(raw)))
+	root, err := html.Parse(bytes.NewReader(raw))
 	if err != nil {
 		return nil
 	}
@@ -59,17 +66,20 @@ func depthsFromXHTML(zr *zip.Reader, base, href string) map[string]int {
 		return nil
 	}
 	out := map[string]int{}
+	// Links in the navigation document are relative to it, not to the package.
 	walkList(list, 1, path.Dir(resolve(base, href)), out)
 	return out
 }
 
+// tocList returns the <ol> of the nav marked epub:type="toc", else the first <ol>.
 func tocList(n *html.Node) *html.Node {
 	var firstOL, tocOL *html.Node
 	var walk func(*html.Node, bool)
 	walk = func(n *html.Node, inToc bool) {
 		if n.Type == html.ElementNode {
 			if n.Data == "nav" {
-				t := attrOf(n, "epub:type")
+				t := htmldoc.Attr(n, "epub:type")
+				// An unmarked <nav> is taken as the toc.
 				inToc = t == "" || strings.Contains(t, "toc")
 			}
 			if n.DataAtom == atom.Ol {
@@ -106,7 +116,7 @@ func walkList(list *html.Node, depth int, base string, out map[string]int) {
 			}
 			switch c.DataAtom {
 			case atom.A:
-				if h := attrOf(c, "href"); h != "" {
+				if h := htmldoc.Attr(c, "href"); h != "" {
 					record(out, resolve(base, h), depth)
 				}
 			case atom.Ol, atom.Ul:
@@ -116,6 +126,8 @@ func walkList(list *html.Node, depth int, base string, out map[string]int) {
 	}
 }
 
+// record keeps the shallowest depth per document: a chapter linked once as
+// itself and again deeper for each of its sections is not demoted.
 func record(out map[string]int, name string, depth int) {
 	if name == "" {
 		return
@@ -125,6 +137,7 @@ func record(out map[string]int, name string, depth int) {
 	}
 }
 
+// depthsFromNCX reads an EPUB 2 toc.ncx, where nested navPoints carry the hierarchy.
 func depthsFromNCX(zr *zip.Reader, base, href string) map[string]int {
 	raw := readPart(zr, base, href)
 	if raw == nil {
@@ -150,15 +163,8 @@ func depthsFromNCX(zr *zip.Reader, base, href string) map[string]int {
 	return out
 }
 
-func attrOf(n *html.Node, key string) string {
-	for _, a := range n.Attr {
-		if a.Key == key {
-			return a.Val
-		}
-	}
-	return ""
-}
-
+// shiftHeadings pushes chapter headings down n levels (capped at 6) so a
+// nested chapter reads as a subsection. Fenced code is skipped, where "#" is a comment.
 func shiftHeadings(md string, n int) string {
 	if n <= 0 {
 		return md

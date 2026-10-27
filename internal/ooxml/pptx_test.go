@@ -51,7 +51,8 @@ func titleSlide(text string) string {
 </p:spTree></p:cSld></p:sld>`
 }
 
-func TestPptxToMarkdown_ManySlidesOrdered(t *testing.T) {
+// Without presentation.xml the part number is the only order available.
+func TestPptxToMarkdown_NoPresentationFallsBackToPartNumber(t *testing.T) {
 	parts := map[string]string{"[Content_Types].xml": `<?xml version="1.0"?><Types/>`}
 	for _, n := range []int{3, 1, 12, 2, 10} {
 		parts[fmt.Sprintf("ppt/slides/slide%d.xml", n)] = titleSlide("Marker" + strconv.Itoa(n) + "End")

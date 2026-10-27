@@ -1,30 +1,51 @@
+// Package rtf converts RTF documents to Markdown with a single-pass control-word
+// scanner: text, headings, bullet and numbered lists, tables and embedded
+// PNG/JPEG pictures.
 package rtf
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/text/encoding/charmap"
 
 	"github.com/0x0520/doc2md/internal/docimg"
 	"github.com/0x0520/doc2md/internal/mdrender"
 )
 
+// ErrNotRTF is returned when the input is not RTF or contains no text.
 var ErrNotRTF = errors.New("not a readable RTF document")
 
+// maxCells bounds the table cells collected from one document.
 const maxCells = 1 << 20
 
+// Destinations whose content is not body text (font and color tables, headers,
+// footers, footnotes, field codes, list definitions) and is dropped.
 var skipDestinations = map[string]bool{
 	"fonttbl": true, "colortbl": true, "stylesheet": true, "info": true,
 	"pict": true, "header": true, "footer": true, "headerl": true, "headerr": true,
 	"headerf": true, "footerl": true, "footerr": true, "footerf": true,
-	"footnote": true, "annotation": true, "comment": true, "xe": true, "tc": true,
+	"annotation": true, "comment": true, "xe": true, "tc": true,
 	"filetbl": true, "revtbl": true, "listtable": true, "listoverridetable": true,
 	"object": true, "fldinst": true, "atnid": true, "atnauthor": true,
 	"pn": true, "pntxtb": true, "pntxta": true,
+	// A shape's \shprslt and a picture's \nonshppict are fallbacks for readers that
+	// do not understand \shp and \shppict; \nonesttables is the same for nested tables.
+	"shprslt": true, "nonshppict": true, "nonesttables": true,
 }
 
+// Ignorable (\*) destinations whose content is read after all: shapes with text
+// boxes, pictures and the rows of nested tables.
+var keepStar = map[string]bool{"shpinst": true, "shppict": true, "do": true, "nesttableprops": true}
+
+// Destinations holding the generated bullet or number of a list item. The text is
+// kept apart from the body and the paragraph is emitted as a list item instead.
 var markerDestinations = map[string]bool{"pntext": true, "listtext": true}
 
+// Control words that stand for a single character.
 var charWords = map[string]string{
 	"lquote": "‘", "rquote": "’", "ldblquote": "“", "rdblquote": "”",
 	"endash": "–", "emdash": "—", "bullet": "•",
@@ -32,52 +53,146 @@ var charWords = map[string]string{
 	"tab": " ", "line": " ", "softline": " ",
 }
 
-var cp1252High = []rune{
-	'€', 0x81, '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', 0x8D, 'Ž', 0x8F,
-	0x90, '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', 0x9D, 'ž', 'Ÿ',
+// codePages maps \ansicpg values to single-byte code pages. Multi-byte East Asian
+// pages are not supported: their characters arrive as pairs of \'hh escapes.
+var codePages = map[int]*charmap.Charmap{
+	437: charmap.CodePage437, 850: charmap.CodePage850, 852: charmap.CodePage852,
+	866: charmap.CodePage866, 874: charmap.Windows874,
+	1250: charmap.Windows1250, 1251: charmap.Windows1251, 1252: charmap.Windows1252,
+	1253: charmap.Windows1253, 1254: charmap.Windows1254, 1255: charmap.Windows1255,
+	1256: charmap.Windows1256, 1257: charmap.Windows1257, 1258: charmap.Windows1258,
+	10000: charmap.Macintosh,
 }
 
+// charsetPages maps the \fcharset of a font to its code page. Charset 0 (ANSI) is
+// absent on purpose: it means the document's own code page.
+var charsetPages = map[int]*charmap.Charmap{
+	161: charmap.Windows1253, 162: charmap.Windows1254, 163: charmap.Windows1258,
+	177: charmap.Windows1255, 178: charmap.Windows1256, 186: charmap.Windows1257,
+	204: charmap.Windows1251, 222: charmap.Windows874, 238: charmap.Windows1250,
+}
+
+// Level number formats (\levelnfc) that are not numbers.
+const (
+	nfcBullet = 23
+	nfcNone   = 255
+)
+
+// orderedMarker matches a generated list label such as "1.", "a)" or "(iv.".
+var orderedMarker = regexp.MustCompile(`^\(?[0-9A-Za-z]+[.)]`)
+
+// state is the formatting state of one group; it is saved on '{' and restored on '}'.
+// uc is the number of fallback characters after a \u escape, level the heading
+// level of the current paragraph (0 for body text) and title whether it is in the
+// Title style. ls and ilvl identify its list and nesting level, font the current
+// font (-1 before any). marker routes text to the list label. em is the character
+// emphasis, base the emphasis of the paragraph style and link the hyperlink whose
+// result text is being written, if any.
 type state struct {
-	skip  bool
+	skip   bool
+	marker bool
+	title  bool
+	// del marks text of a tracked deletion; itap is the table nesting depth of the paragraph.
+	del   bool
+	itap  int
 	uc    int
-	style int
 	level int
-	table bool
+	ls    int
+	ilvl  int
+	font  int
+	em    mdrender.Emphasis
+	base  mdrender.Emphasis
+	link  *mdrender.Link
 }
 
+// parser accumulates blocks while walking the RTF source. Text goes to cell while
+// inside a table row, otherwise to para.
 type parser struct {
-	styleLevel map[int]int
-	blocks     []mdrender.Block
-	para       strings.Builder
-	row        []string
-	cell       strings.Builder
+	styles  stylesheet
+	lists   map[int][]int
+	fonts   map[int]*charmap.Charmap
+	docPage *charmap.Charmap
+	defFont int
+	blocks  []mdrender.Block
+	titles  []int
+	para    mdrender.Inline
+	label   strings.Builder
+	row     []string
+	cell    mdrender.Inline
+	// nest and nestRow collect the cells of a nested table's row until \nestrow;
+	// nestRows counts the rows already flattened into the open cell.
+	nest     mdrender.Inline
+	nestRow  []string
+	nestRows int
+	// notes are the texts of footnotes and endnotes in order of reference. boxes and
+	// tableBoxes hold text box paragraphs, written after the paragraph or table they are anchored in.
+	notes      []string
+	boxes      []mdrender.Block
+	tableBoxes []mdrender.Block
 	grid       [][]string
 	cells      int
 	inRow      bool
 	listItem   bool
+	// tocField is set between a TOC field's instruction and its result;
+	// fieldLink holds the target of a HYPERLINK field until its result.
+	tocField  bool
+	fieldLink *mdrender.Link
 
 	seq    int
 	total  int
 	images []docimg.Image
 }
 
+// ToMarkdown converts RTF bytes to Markdown and returns embedded pictures.
 func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	s := string(data)
 	if !strings.HasPrefix(strings.TrimLeft(s, " \t\r\n"), `{\rtf`) {
 		return "", nil, ErrNotRTF
 	}
-	p := &parser{styleLevel: parseStylesheet(s)}
+	p := &parser{
+		styles:  parseStylesheet(s),
+		lists:   parseLists(s),
+		fonts:   parseFonts(s),
+		docPage: charmap.Windows1252,
+		defFont: -1,
+	}
 	p.walk(s)
 	p.flushParagraph(state{})
 	p.flushTable()
 	if len(p.blocks) == 0 {
 		return "", nil, ErrNotRTF
 	}
+	// GFM footnote definitions close the document; one sequence for footnotes and endnotes.
+	for i, n := range p.notes {
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: fmt.Sprintf("[^%d]: %s", i+1, n)})
+	}
+	p.shiftHeadings()
 	return mdrender.Document(p.blocks), p.images, nil
 }
 
+// shiftHeadings applies the DOCX reader's rule: Title is "#" and, when the
+// document has one, the real headings move one level down.
+func (p *parser) shiftHeadings() {
+	if len(p.titles) == 0 {
+		return
+	}
+	isTitle := map[int]bool{}
+	for _, i := range p.titles {
+		isTitle[i] = true
+	}
+	for i := range p.blocks {
+		if p.blocks[i].Kind == mdrender.Heading && !isTitle[i] {
+			p.blocks[i].Level++
+		}
+	}
+}
+
+// walk scans s once, tracking group nesting; control words are handled in apply.
 func (p *parser) walk(s string) {
-	st := state{uc: 1}
+	p.walkFrom(state{uc: 1, font: -1}, s)
+}
+
+func (p *parser) walkFrom(st state, s string) {
 	var stack []state
 	for i := 0; i < len(s); {
 		switch c := s[i]; c {
@@ -93,51 +208,107 @@ func (p *parser) walk(s string) {
 		case '\\':
 			word, arg, hasArg, next := control(s, i)
 			i = p.apply(&st, s, word, arg, hasArg, next)
+		// Raw line breaks are not content in RTF; \par is the paragraph break.
 		case '\r', '\n':
 			i++
 		default:
-			if !st.skip {
-				p.write(string(c))
-			}
+			p.emit(st, string(c))
 			i++
 		}
 	}
 }
 
+// apply handles one control word and returns the index to continue scanning from.
 func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int) int {
+	// Dropped text must not break paragraphs or rows either; a deleted paragraph
+	// mark joins its paragraph to the next.
+	if st.skip || st.del {
+		switch word {
+		case "par", "sect":
+			return next
+		case "cell", "row", "nestcell", "nestrow", "intbl", "trowd":
+			if st.skip {
+				return next
+			}
+		}
+	}
 	switch word {
+	// \* marks an ignorable destination: the rest of the group is dropped, unless
+	// it is one of keepStar.
 	case "*":
+		if !keepStar[nextWord(s, next)] {
+			st.skip = true
+		}
+	case "deleted":
+		st.del = !hasArg || arg != 0
+	case "itap":
+		if hasArg {
+			st.itap = arg
+		}
+	case "nestcell":
+		p.endNestCell()
+	case "nestrow":
+		p.endNestRow()
+	case "footnote":
+		if st.del {
+			st.skip = true
+			return next
+		}
+		return p.note(*st, s, next)
+	case "shptxt", "dptxbxtext":
+		return p.textBox(*st, s, next)
+	// A shape's properties hold the picture of a floating image; their other values are not text.
+	case "sp":
+		if !st.skip && !st.del {
+			if end, body := pictGroup(s, next); end >= 0 {
+				if i := strings.Index(body, `{\pict`); i >= 0 {
+					p.picture(s, next+i+len(`{\pict`))
+				}
+			}
+		}
 		st.skip = true
 	case `\`, "{", "}":
-		if !st.skip {
-			p.write(word)
-		}
+		p.emit(*st, word)
 	case "~":
-		if !st.skip {
-			p.write(" ")
-		}
+		p.emit(*st, " ")
+	// \'hh is one byte of the code page of the current font, else of the document.
 	case "'":
 		if next+2 <= len(s) {
-			if b, err := strconv.ParseUint(s[next:next+2], 16, 8); err == nil && !st.skip {
-				p.writeByte(byte(b))
+			if b, err := strconv.ParseUint(s[next:next+2], 16, 8); err == nil {
+				p.emit(*st, string(p.page(*st).DecodeByte(byte(b))))
 			}
 			return next + 2
 		}
+	// \uN is a UTF-16 code unit as a signed 16-bit number; the uc fallback characters
+	// that follow it are skipped.
 	case "u":
 		if hasArg {
 			r := arg
 			if r < 0 {
 				r += 65536
 			}
-			if !st.skip {
-				p.write(string(rune(r)))
-			}
+			p.emit(*st, string(rune(r)))
 			return skipUnits(s, next, st.uc)
 		}
 	case "uc":
 		if hasArg {
 			st.uc = arg
 		}
+	case "ansicpg":
+		if cm, ok := codePages[arg]; ok && hasArg {
+			p.docPage = cm
+		}
+	case "mac":
+		p.docPage = charmap.Macintosh
+	case "deff":
+		if hasArg {
+			p.defFont = arg
+		}
+	case "f":
+		if hasArg {
+			st.font = arg
+		}
+	// \binN is followed by N raw bytes that must not be parsed as RTF.
 	case "bin":
 		if hasArg && arg > 0 && next+arg <= len(s) {
 			return next + arg
@@ -145,62 +316,132 @@ func (p *parser) apply(st *state, s, word string, arg int, hasArg bool, next int
 	case "par", "sect":
 		p.flushParagraph(*st)
 	case "pard":
-		st.level, st.style, st.table = 0, 0, false
+		st.level, st.title, st.ls, st.ilvl, st.base, st.itap = 0, false, 0, 0, mdrender.Emphasis{}, 0
 	case "intbl", "trowd":
-		st.table = true
 		p.openRow(*st)
 	case "cell":
 		p.endCell()
 	case "row":
 		p.endRow()
+	// Outline level 0 is the top level, which becomes a level-1 heading.
 	case "outlinelevel":
 		if hasArg && arg >= 0 && arg <= 8 {
 			st.level = arg + 1
 		}
 	case "s":
 		if hasArg {
-			st.style = arg
-			if lvl, ok := p.styleLevel[arg]; ok {
+			st.base = p.styles.paras[arg]
+			if p.styles.titles[arg] {
+				st.title = true
+			} else if lvl, ok := p.styles.levels[arg]; ok {
 				st.level = lvl
 			}
 		}
+	case "ls":
+		if hasArg {
+			st.ls = arg
+		}
+	case "ilvl":
+		if hasArg && arg >= 0 && arg <= 8 {
+			st.ilvl = arg
+		}
+	// Pictures are decoded by picture; the rest of the group (hex data) is skipped.
 	case "pict":
+		deleted := st.skip || st.del
 		st.skip = true
+		if deleted {
+			return next
+		}
 		if end := p.picture(s, next); end > 0 {
 			return end
+		}
+	case "field":
+		p.tocField, p.fieldLink = false, nil
+	// A table of contents is generated text with page numbers. Its instruction
+	// is only readable here, so the result group that follows is dropped.
+	case "fldinst":
+		st.skip = true
+		code := fieldCode(s, next)
+		p.tocField = isTOC(code)
+		if url := hyperlinkTarget(code); url != "" {
+			p.fieldLink = &mdrender.Link{URL: url}
+		}
+	case "fldrslt":
+		if p.tocField {
+			st.skip = true
+			p.tocField = false
+		}
+		st.link = p.fieldLink
+	// A switch with argument 0 turns the property off.
+	case "b":
+		st.em.Bold = !hasArg || arg != 0
+	case "i":
+		st.em.Italic = !hasArg || arg != 0
+	case "strike", "striked":
+		st.em.Strike = !hasArg || arg != 0
+	case "plain":
+		st.em, st.del = mdrender.Emphasis{}, false
+	case "cs":
+		if cs, ok := p.styles.chars[arg]; ok && hasArg {
+			st.em.Bold = st.em.Bold || cs.Bold
+			st.em.Italic = st.em.Italic || cs.Italic
+			st.em.Strike = st.em.Strike || cs.Strike
 		}
 	default:
 		switch {
 		case markerDestinations[word]:
-			st.skip = true
+			st.marker = true
 			p.listItem = true
+			p.label.Reset()
 		case skipDestinations[word]:
 			st.skip = true
 		case charWords[word] != "":
-			if !st.skip {
-				p.write(charWords[word])
-			}
+			p.emit(*st, charWords[word])
 		}
 	}
 	return next
 }
 
-func (p *parser) write(s string) {
+// page returns the code page for \'hh bytes: that of the current font if its
+// charset names one, else the font the document defaults to, else the document's.
+func (p *parser) page(st state) *charmap.Charmap {
+	for _, f := range []int{st.font, p.defFont} {
+		if cm, ok := p.fonts[f]; ok {
+			return cm
+		}
+	}
+	return p.docPage
+}
+
+// emit writes text of the current group unless it is dropped; list labels are
+// collected separately.
+func (p *parser) emit(st state, s string) {
+	switch {
+	case st.skip || st.del:
+	case st.marker:
+		p.label.WriteString(s)
+	default:
+		p.write(st, s)
+	}
+}
+
+// write adds text to the open cell or paragraph. Word repeats the formatting of a
+// paragraph's style as direct formatting; emphasis the style itself carries is
+// dropped, as the DOCX reader drops it, so only the author's own marking remains.
+func (p *parser) write(st state, s string) {
+	em := mdrender.Emphasis{Bold: st.em.Bold && !st.base.Bold, Italic: st.em.Italic && !st.base.Italic, Strike: st.em.Strike && !st.base.Strike}
 	if p.inRow {
-		p.cell.WriteString(s)
+		if st.itap > 1 {
+			p.nest.Add(s, em, st.link)
+			return
+		}
+		p.cell.Add(s, em, st.link)
 		return
 	}
-	p.para.WriteString(s)
+	p.para.Add(s, em, st.link)
 }
 
-func (p *parser) writeByte(b byte) {
-	if b >= 0x80 && b <= 0x9F {
-		p.write(string(cp1252High[b-0x80]))
-		return
-	}
-	p.write(string(rune(b)))
-}
-
+// openRow starts a table row, flushing any open paragraph so it stays outside the table.
 func (p *parser) openRow(st state) {
 	if p.inRow {
 		return
@@ -209,20 +450,34 @@ func (p *parser) openRow(st state) {
 	p.inRow = true
 }
 
+// endCell closes the current cell; past maxCells the row is closed to stop growth.
 func (p *parser) endCell() {
 	if !p.inRow {
 		return
 	}
-	p.row = append(p.row, squeeze(p.cell.String()))
+	p.closeNested()
+	p.row = append(p.row, squeeze(p.cell.Render(true)))
 	p.cell.Reset()
+	// A list label inside a cell belongs to the cell, not to the next paragraph.
+	p.listItem = false
+	p.label.Reset()
 	if p.cells++; p.cells > maxCells {
 		p.endRow()
 	}
 }
 
+// closeNested flattens a nested row left open (no \nestrow) and ends the nested table.
+func (p *parser) closeNested() {
+	if !p.nest.Empty() || len(p.nestRow) > 0 {
+		p.endNestRow()
+	}
+	p.nestRows = 0
+}
+
 func (p *parser) endRow() {
-	if p.cell.Len() > 0 {
-		p.row = append(p.row, squeeze(p.cell.String()))
+	p.closeNested()
+	if !p.cell.Empty() {
+		p.row = append(p.row, squeeze(p.cell.Render(true)))
 		p.cell.Reset()
 	}
 	if len(p.row) > 0 {
@@ -232,30 +487,59 @@ func (p *parser) endRow() {
 	p.inRow = false
 }
 
+// listKind reports whether the paragraph is a list item and whether it is numbered.
+// The list definition decides; without one, the label Word generated does.
+func (p *parser) listKind(st state) (item, ordered bool) {
+	if levels := p.lists[st.ls]; st.ls > 0 && len(levels) > 0 {
+		nfc := levels[min(st.ilvl, len(levels)-1)]
+		return nfc != nfcNone || p.listItem, nfc != nfcBullet && nfc != nfcNone
+	}
+	if !p.listItem {
+		return false, false
+	}
+	return true, orderedMarker.MatchString(strings.TrimSpace(p.label.String()))
+}
+
+// flushParagraph emits the pending text as a heading, list item or paragraph. Inside
+// a table row a paragraph break only separates words within the cell.
 func (p *parser) flushParagraph(st state) {
+	item, ordered := p.listKind(st)
+	p.listItem = false
+	p.label.Reset()
 	if p.inRow {
-		p.cell.WriteString(" ")
+		if st.itap > 1 {
+			p.nest.Add(" ", mdrender.Emphasis{}, nil)
+		} else {
+			p.cell.Add(" ", mdrender.Emphasis{}, nil)
+		}
 		return
 	}
-	txt := squeeze(p.para.String())
-	list := p.listItem
+	defer p.flushBoxes(&p.boxes)
+	txt := squeeze(p.para.Render(!st.title && st.level == 0))
 	p.para.Reset()
-	p.listItem = false
 	if txt == "" {
 		return
 	}
 	p.flushTable()
 	switch {
-	case list:
-		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.List, Text: "- " + txt})
+	case st.title:
+		p.titles = append(p.titles, len(p.blocks))
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: 1, Text: txt})
 	case st.level > 0:
 		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Heading, Level: st.level, Text: txt})
+	case item:
+		marker := "- "
+		if ordered {
+			marker = "1. "
+		}
+		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.List, Text: strings.Repeat("  ", st.ilvl) + marker + txt})
 	default:
 		p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: txt})
 	}
 }
 
 func (p *parser) flushTable() {
+	defer p.flushBoxes(&p.tableBoxes)
 	if len(p.grid) == 0 {
 		return
 	}
@@ -267,8 +551,12 @@ func (p *parser) flushTable() {
 	p.blocks = append(p.blocks, mdrender.Block{Kind: mdrender.Table_, Text: mdrender.Table(grid)})
 }
 
+// squeeze collapses runs of whitespace to single spaces.
 func squeeze(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// control parses the control word or symbol at s[i] (a backslash). It returns the
+// word, its optional numeric argument, and the index after it, including the one
+// space that delimits a control word.
 func control(s string, i int) (word string, arg int, hasArg bool, next int) {
 	j := i + 1
 	if j >= len(s) {
@@ -303,6 +591,7 @@ func control(s string, i int) (word string, arg int, hasArg bool, next int) {
 	return word, arg, hasArg, n
 }
 
+// skipUnits skips the n fallback characters after \uN; a \'hh escape counts as one.
 func skipUnits(s string, i, n int) int {
 	for ; n > 0 && i < len(s); n-- {
 		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '\'' {
@@ -325,8 +614,75 @@ func skipUnits(s string, i, n int) int {
 func isAlpha(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-func parseStylesheet(s string) map[int]int {
-	out := map[int]int{}
+// maxFieldCode bounds the instruction text read from a field.
+const maxFieldCode = 4096
+
+// fieldCode returns the instruction text of the field whose \fldinst destination
+// content begins at s[from], without control words and without ignorable groups
+// such as the binary \datafield Word adds to hyperlinks.
+func fieldCode(s string, from int) string {
+	var b strings.Builder
+	depth := 1
+	for i := from; i < len(s) && depth > 0 && b.Len() < maxFieldCode; {
+		switch s[i] {
+		case '{':
+			if strings.HasPrefix(s[i+1:], `\*`) {
+				g, ok := group(s, i)
+				if !ok {
+					return strings.TrimSpace(b.String())
+				}
+				i += len(g) + 2
+				continue
+			}
+			depth++
+			i++
+		case '}':
+			depth--
+			i++
+		case '\\':
+			var word string
+			word, _, _, i = control(s, i)
+			switch word {
+			case `\`, "{", "}":
+				b.WriteString(word)
+			case "'":
+				if i+2 <= len(s) {
+					if v, err := strconv.ParseUint(s[i:i+2], 16, 8); err == nil {
+						b.WriteRune(charmap.Windows1252.DecodeByte(byte(v)))
+					}
+					i += 2
+				}
+			}
+		case '\r', '\n':
+			i++
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// isTOC reports whether a field instruction is the TOC field.
+func isTOC(code string) bool {
+	code = strings.ToUpper(code)
+	return strings.HasPrefix(code, "TOC") && (len(code) == 3 || !isAlpha(code[3]))
+}
+
+// stylesheet holds what the paragraph styles say about headings: the heading
+// level of styles with an \outlinelevel and the numbers of styles named Title.
+// chars and paras hold the emphasis of the character (\csN) and paragraph (\sN)
+// styles; their \sbasedon chain is not followed.
+type stylesheet struct {
+	levels map[int]int
+	titles map[int]bool
+	chars  map[int]mdrender.Emphasis
+	paras  map[int]mdrender.Emphasis
+}
+
+// parseStylesheet reads the paragraph (\sN) and character (\csN) styles from the stylesheet.
+func parseStylesheet(s string) stylesheet {
+	out := stylesheet{levels: map[int]int{}, titles: map[int]bool{}, chars: map[int]mdrender.Emphasis{}, paras: map[int]mdrender.Emphasis{}}
 	start := strings.Index(s, `{\stylesheet`)
 	if start < 0 {
 		return out
@@ -335,36 +691,207 @@ func parseStylesheet(s string) map[int]int {
 	if !ok {
 		return out
 	}
-	for i := 0; i < len(body); i++ {
-		if body[i] != '{' {
-			continue
-		}
-		entry, ok := group(body, i)
-		if !ok {
-			break
-		}
-		i += len(entry) + 1
-		num, lvl := 0, -1
-		for j := 0; j < len(entry); j++ {
-			if entry[j] != '\\' {
-				continue
-			}
-			word, arg, hasArg, next := control(entry, j)
-			j = next - 1
+	eachGroup(body, func(entry string) {
+		num, lvl, isPara := 0, -1, false
+		csNum, cs, isChar := 0, mdrender.Emphasis{}, false
+		topWords(entry, func(word string, arg int, hasArg bool) {
+			on := !hasArg || arg != 0
 			switch {
+			case word == "cs" && hasArg:
+				csNum, isChar = arg, true
+			case word == "b":
+				cs.Bold = on
+			case word == "i":
+				cs.Italic = on
+			case word == "strike" || word == "striked":
+				cs.Strike = on
 			case word == "s" && hasArg:
-				num = arg
+				num, isPara = arg, true
 			case word == "outlinelevel" && hasArg && arg >= 0 && arg <= 8:
 				lvl = arg + 1
 			}
+		})
+		if isChar {
+			out.chars[csNum] = cs
 		}
-		if lvl > 0 {
-			out[num] = lvl
+		if !isPara {
+			return
+		}
+		out.paras[num] = cs
+		// Word writes the built-in name even in localised documents; "Titel" is
+		// kept for other producers, as in the OpenDocument reader.
+		if name := strings.ToLower(styleName(entry)); name == "title" || name == "titel" {
+			out.titles[num] = true
+		} else if lvl > 0 {
+			out.levels[num] = lvl
+		}
+	})
+	return out
+}
+
+// styleName returns the text of a stylesheet entry outside its control words and
+// subgroups, without the closing semicolon.
+func styleName(entry string) string {
+	var b strings.Builder
+	for i := 0; i < len(entry); {
+		switch entry[i] {
+		case '{':
+			g, ok := group(entry, i)
+			if !ok {
+				return strings.TrimSpace(strings.TrimSuffix(b.String(), ";"))
+			}
+			i += len(g) + 2
+		case '\\':
+			_, _, _, i = control(entry, i)
+		case '\r', '\n':
+			i++
+		default:
+			b.WriteByte(entry[i])
+			i++
+		}
+	}
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(b.String()), ";"))
+}
+
+// parseLists maps each list override number (\lsN) to the number format
+// (\levelnfc) of every level of the list it selects.
+func parseLists(s string) map[int][]int {
+	out := map[int][]int{}
+	templates := map[int][]int{}
+	if body, ok := destination(s, `\listtable`); ok {
+		eachGroup(body, func(list string) {
+			id, hasID := 0, false
+			topWords(list, func(word string, arg int, hasArg bool) {
+				if word == "listid" && hasArg {
+					id, hasID = arg, true
+				}
+			})
+			var levels []int
+			eachGroup(list, func(level string) {
+				if !strings.HasPrefix(level, `\listlevel`) {
+					return
+				}
+				nfc := 0
+				topWords(level, func(word string, arg int, hasArg bool) {
+					if word == "levelnfc" && hasArg {
+						nfc = arg
+					}
+				})
+				levels = append(levels, nfc)
+			})
+			if hasID {
+				templates[id] = levels
+			}
+		})
+	}
+	if body, ok := destination(s, `\listoverridetable`); ok {
+		eachGroup(body, func(override string) {
+			id, ls := 0, 0
+			topWords(override, func(word string, arg int, hasArg bool) {
+				switch {
+				case word == "listid" && hasArg:
+					id = arg
+				case word == "ls" && hasArg:
+					ls = arg
+				}
+			})
+			if levels, ok := templates[id]; ok && ls > 0 {
+				out[ls] = levels
+			}
+		})
+	}
+	return out
+}
+
+// parseFonts maps font numbers to the code page their \fcharset names. Fonts
+// without one (charset 0 and unknown values) use the document's code page.
+func parseFonts(s string) map[int]*charmap.Charmap {
+	out := map[int]*charmap.Charmap{}
+	body, ok := destination(s, `\fonttbl`)
+	if !ok {
+		return out
+	}
+	cur := -1
+	var stack []int
+	for i := 0; i < len(body); {
+		switch body[i] {
+		case '{':
+			stack = append(stack, cur)
+			i++
+		case '}':
+			if n := len(stack); n > 0 {
+				cur, stack = stack[n-1], stack[:n-1]
+			}
+			i++
+		case '\\':
+			word, arg, hasArg, next := control(body, i)
+			switch {
+			case word == "f" && hasArg:
+				cur = arg
+			case word == "fcharset" && hasArg && cur >= 0:
+				if cm, ok := charsetPages[arg]; ok {
+					out[cur] = cm
+				}
+			}
+			i = next
+		default:
+			i++
 		}
 	}
 	return out
 }
 
+// destination returns the contents of the group opened by the control word name.
+func destination(s, name string) (string, bool) {
+	idx := strings.Index(s, name)
+	if idx < 0 {
+		return "", false
+	}
+	start := strings.LastIndex(s[:idx], "{")
+	if start < 0 {
+		return "", false
+	}
+	return group(s, start)
+}
+
+// eachGroup calls fn with the contents of every brace group directly inside body.
+func eachGroup(body string, fn func(string)) {
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\\':
+			i++
+		case '{':
+			g, ok := group(body, i)
+			if !ok {
+				return
+			}
+			fn(g)
+			i += len(g) + 1
+		}
+	}
+}
+
+// topWords calls fn for every control word of body outside its subgroups.
+func topWords(body string, fn func(word string, arg int, hasArg bool)) {
+	for i := 0; i < len(body); {
+		switch body[i] {
+		case '{':
+			g, ok := group(body, i)
+			if !ok {
+				return
+			}
+			i += len(g) + 2
+		case '\\':
+			word, arg, hasArg, next := control(body, i)
+			fn(word, arg, hasArg)
+			i = next
+		default:
+			i++
+		}
+	}
+}
+
+// group returns the contents of the brace group opening at s[i], honouring escapes.
 func group(s string, i int) (string, bool) {
 	depth := 0
 	for j := i; j < len(s); j++ {
@@ -380,4 +907,105 @@ func group(s string, i int) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// nextWord returns the control word that starts at s[i], or "" if there is none.
+func nextWord(s string, i int) string {
+	if i >= len(s) || s[i] != '\\' {
+		return ""
+	}
+	w, _, _, _ := control(s, i)
+	return w
+}
+
+// subParse converts the body of a group on its own, with the document's fonts,
+// styles and pictures counters, and returns its blocks.
+func (p *parser) subParse(st state, body string) []mdrender.Block {
+	q := &parser{
+		styles: p.styles, lists: p.lists, fonts: p.fonts, docPage: p.docPage, defFont: p.defFont,
+		seq: p.seq, total: p.total, images: p.images,
+	}
+	q.walkFrom(state{uc: st.uc, font: st.font}, body)
+	q.flushParagraph(state{})
+	q.flushTable()
+	p.seq, p.total, p.images = q.seq, q.total, q.images
+	return q.blocks
+}
+
+// note reads the \footnote group whose content starts at from, records its text
+// and writes the reference into the text. It returns the index of the group's
+// closing brace. \chftn, the reference mark, produces no text of its own: the
+// number comes from the order of reference, shared by footnotes and endnotes.
+func (p *parser) note(st state, s string, from int) int {
+	end, body := pictGroup(s, from)
+	if end < 0 {
+		return from
+	}
+	var parts []string
+	for _, b := range p.subParse(st, body) {
+		parts = append(parts, b.Text)
+	}
+	p.notes = append(p.notes, strings.Join(parts, " "))
+	p.write(state{}, fmt.Sprintf("[^%d]", len(p.notes)))
+	return end
+}
+
+// textBox reads the text of a shape or legacy drawing object whose content starts
+// at from and queues it as paragraphs after the anchoring paragraph. It returns the
+// index of the group's closing brace.
+func (p *parser) textBox(st state, s string, from int) int {
+	if st.skip || st.del {
+		return from
+	}
+	end, body := pictGroup(s, from)
+	if end < 0 {
+		return from
+	}
+	for _, b := range p.subParse(st, body) {
+		if b.Kind == mdrender.Heading {
+			b.Kind = mdrender.Paragraph
+		}
+		if p.inRow {
+			p.tableBoxes = append(p.tableBoxes, b)
+		} else {
+			p.boxes = append(p.boxes, b)
+		}
+	}
+	return end
+}
+
+// endNestCell closes a cell of a nested table.
+func (p *parser) endNestCell() {
+	p.nestRow = append(p.nestRow, squeeze(p.nest.Render(true)))
+	p.nest.Reset()
+}
+
+// endNestRow flattens the nested row just read into the open outer cell: cells
+// joined by ", ", rows by "; ".
+func (p *parser) endNestRow() {
+	if !p.nest.Empty() {
+		p.endNestCell()
+	}
+	var cells []string
+	for _, c := range p.nestRow {
+		if c != "" {
+			cells = append(cells, c)
+		}
+	}
+	p.nestRow = nil
+	if len(cells) == 0 {
+		return
+	}
+	sep := " "
+	if p.nestRows > 0 {
+		sep = "; "
+	}
+	p.cell.Add(sep+strings.Join(cells, ", "), mdrender.Emphasis{}, nil)
+	p.nestRows++
+}
+
+// flushBoxes writes the queued text box paragraphs.
+func (p *parser) flushBoxes(boxes *[]mdrender.Block) {
+	p.blocks = append(p.blocks, *boxes...)
+	*boxes = nil
 }

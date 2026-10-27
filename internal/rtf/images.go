@@ -7,20 +7,22 @@ import (
 	"github.com/0x0520/doc2md/internal/docimg"
 )
 
-const maxPictureBytes = 128 << 20
-
+// blipFormats maps picture control words to extensions. Only PNG and JPEG are
+// extracted; metafile and bitmap pictures are skipped.
 var blipFormats = map[string]string{
 	"pngblip":  "png",
 	"jpegblip": "jpg",
 }
 
+// picture decodes the \pict group starting at from, writes its marker into the
+// text and returns the index of the group's closing brace, or -1 if it is unclosed.
 func (p *parser) picture(s string, from int) int {
 	end, body := pictGroup(s, from)
 	if end < 0 {
 		return -1
 	}
 	ext, payload := blipPayload(body)
-	if ext == "" || p.total >= maxPictureBytes {
+	if ext == "" || p.total >= docimg.MaxTotalBytes {
 		return end
 	}
 	b, err := hex.DecodeString(payload)
@@ -30,10 +32,11 @@ func (p *parser) picture(s string, from int) int {
 	p.total += len(b)
 	p.seq++
 	p.images = append(p.images, docimg.Image{Seq: p.seq, Bytes: b, Ext: ext})
-	p.write(" " + docimg.MarkerFor(p.seq) + " ")
+	p.write(state{}, " "+docimg.MarkerFor(p.seq)+" ")
 	return end
 }
 
+// pictGroup returns the index of the brace closing the current group and its contents.
 func pictGroup(s string, from int) (end int, body string) {
 	depth := 1
 	for i := from; i < len(s); i++ {
@@ -51,6 +54,9 @@ func pictGroup(s string, from int) (end int, body string) {
 	return -1, ""
 }
 
+// blipPayload finds the PNG/JPEG control word in a \pict body and returns the
+// extension and the hex-encoded image data that follows the width, height and crop
+// control words and nested groups.
 func blipPayload(body string) (ext, payload string) {
 	for word, e := range blipFormats {
 		i := strings.Index(body, `\`+word)

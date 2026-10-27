@@ -10,17 +10,19 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
-const maxImageBytes = 128 << 20
-
+// media extracts images from a package's media/ parts on demand and numbers them
+// in reading order.
 type media struct {
 	files  map[string]*zip.File
 	seq    int
 	total  int
 	images []docimg.Image
+	// markers remembers the marker per part, so a picture used twice is extracted once.
+	markers map[string]string
 }
 
 func newMedia(zr *zip.Reader) *media {
-	m := &media{files: map[string]*zip.File{}}
+	m := &media{files: map[string]*zip.File{}, markers: map[string]string{}}
 	for _, f := range zr.File {
 		if strings.Contains(f.Name, "/media/") {
 			m.files[f.Name] = f
@@ -29,7 +31,13 @@ func newMedia(zr *zip.Reader) *media {
 	return m
 }
 
+// marker extracts the image at part and returns its "[Image: N]" marker, or "" if
+// it is skipped (unknown type, size cap reached, unreadable or empty). A part that
+// was already extracted returns its first marker.
 func (m *media) marker(part string, page int) string {
+	if mk, ok := m.markers[part]; ok {
+		return mk
+	}
 	f := m.files[part]
 	if f == nil {
 		return ""
@@ -38,7 +46,7 @@ func (m *media) marker(part string, page int) string {
 	if ext == "" {
 		return ""
 	}
-	if m.total >= maxImageBytes {
+	if m.total >= docimg.MaxTotalBytes {
 		return ""
 	}
 	b, err := zipx.ReadEntry(f)
@@ -48,9 +56,13 @@ func (m *media) marker(part string, page int) string {
 	m.total += len(b)
 	m.seq++
 	m.images = append(m.images, docimg.Image{Seq: m.seq, Page: page, Bytes: b, Ext: ext})
-	return docimg.MarkerFor(m.seq)
+	mk := docimg.MarkerFor(m.seq)
+	m.markers[part] = mk
+	return mk
 }
 
+// relTargets resolves internal relationship targets to package paths. Relative
+// targets are taken from baseDir; a leading "/" means package-absolute.
 func relTargets(b []byte, baseDir string) map[string]string {
 	out := map[string]string{}
 	if len(b) == 0 {
@@ -80,7 +92,15 @@ func relTargets(b []byte, baseDir string) map[string]string {
 	return out
 }
 
+// embedID reads up to the closing tag and returns the relationship id of the first
+// image: DrawingML a:blip (r:embed) or legacy VML v:imagedata (r:id).
 func embedID(dec *xml.Decoder, closing string) string {
+	return embedIDBox(dec, closing, nil)
+}
+
+// embedIDBox is embedID that also hands a w:txbxContent to box, which must consume
+// the element through its end tag.
+func embedIDBox(dec *xml.Decoder, closing string, box func()) string {
 	id := ""
 	depth := 1
 	for depth > 0 {
@@ -91,6 +111,12 @@ func embedID(dec *xml.Decoder, closing string) string {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "txbxContent":
+				if box != nil {
+					box()
+				} else {
+					skip(dec)
+				}
 			case "blip":
 				if v := attr(t, "embed"); v != "" && id == "" {
 					id = v

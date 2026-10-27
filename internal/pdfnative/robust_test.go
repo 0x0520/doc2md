@@ -3,6 +3,7 @@ package pdfnative
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,6 +28,32 @@ func TestRenderReadsPermissionOnlyEncryptedPDF(t *testing.T) {
 	}
 	if !strings.Contains(md, "Minutes") {
 		t.Errorf("text of the encrypted page missing:\n%s", md)
+	}
+}
+
+func TestRenderRejectsUserPasswordPDF(t *testing.T) {
+	plain := buildPDF(t, synthPage{runs: []textRun{
+		{text: "Minutes of the meeting", x: 72, yTop: 120, size: 10},
+	}})
+	for name, conf := range map[string]*model.Configuration{
+		"AES-128": encryptConfig("userpass", "ownerpass", true, 128),
+		"AES-256": encryptConfig("userpass", "ownerpass", true, 256),
+		"RC4-40":  encryptConfig("userpass", "ownerpass", false, 40),
+		"RC4-128": encryptConfig("userpass", "ownerpass", false, 128),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var enc bytes.Buffer
+			if err := api.Encrypt(context.Background(), bytes.NewReader(plain), &enc, conf); err != nil {
+				t.Fatalf("encrypt fixture: %v", err)
+			}
+			md, err := Extract(enc.Bytes())
+			if !errors.Is(err, ErrEncrypted) {
+				t.Fatalf("Extract error = %v, want ErrEncrypted", err)
+			}
+			if md != "" {
+				t.Errorf("no text may be returned for an unreadable file, got %q", md)
+			}
+		})
 	}
 }
 
@@ -66,7 +93,12 @@ func rawPDF(contents ...string) []byte {
 			fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(c), c),
 		)
 	}
+	return pdfFromObjects(objs)
+}
 
+// pdfFromObjects numbers objs from 1 (the first must be the catalog) and adds the
+// cross-reference table.
+func pdfFromObjects(objs []string) []byte {
 	var b bytes.Buffer
 	b.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objs))
@@ -83,6 +115,39 @@ func rawPDF(contents ...string) []byte {
 	return b.Bytes()
 }
 
+func TestDocumentPagesWalksNestedTreeInOrder(t *testing.T) {
+	content := func(s string) string {
+		c := "BT /F1 12 Tf 72 720 Td (" + s + ") Tj ET"
+		return fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(c), c)
+	}
+	pg := func(parent, contents int) string {
+		return fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", parent, contents)
+	}
+	data := pdfFromObjects([]string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		// The root holds an intermediate node with two pages, then a third page; the
+		// intermediate node also lists the root again, a cycle that must not hang.
+		"<< /Type /Pages /Kids [4 0 R 7 0 R] /Count 3 >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		"<< /Type /Pages /Parent 2 0 R /Kids [5 0 R 6 0 R 2 0 R] /Count 2 >>",
+		pg(4, 8), pg(4, 9), pg(2, 10),
+		content("First page text"), content("Second page text"), content("Third page text"),
+	})
+	md, _, breaks, err := RenderVerbatim(data)
+	if err != nil {
+		t.Fatalf("RenderVerbatim: %v", err)
+	}
+	i1, i2, i3 := strings.Index(md, "First"), strings.Index(md, "Second"), strings.Index(md, "Third")
+	if i1 < 0 || i2 < i1 || i3 < i2 {
+		t.Errorf("pages missing or out of order:\n%s", md)
+	}
+	if len(breaks) != 3 || breaks[2].Page != 3 {
+		t.Errorf("page breaks = %v, want pages 1 to 3", breaks)
+	}
+}
+
+// encryptConfig is pdfcpu's stateless configuration set up to encrypt; the
+// NewAESConfiguration helpers would read or create a config directory on disk.
 func encryptConfig(userPW, ownerPW string, aes bool, keyLength int) *model.Configuration {
 	c := model.NewStatelessConfiguration()
 	c.UserPW, c.OwnerPW = userPW, ownerPW

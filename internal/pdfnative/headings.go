@@ -7,10 +7,15 @@ import (
 )
 
 var (
+	// outlineHeadingRe matches a numbered heading such as "2.3.1 Scope" or "A.2 Terms":
+	// the number, optional trailing punctuation, and a title starting uppercase.
 	outlineHeadingRe = regexp.MustCompile(`^((?:[A-Za-z]\.)?\d+(?:\.\d+){0,3})([.):]?)\s+(\p{Lu}.*)$`)
-	labelHeadingRe   = regexp.MustCompile(`^(?:§\s*|\p{L}{2,15}\.?\s+)(\d+[a-z]?|\p{Lu}\d*)\b`)
+	// labelHeadingRe matches a heading opened by a label word or sign and a number or letter ("Art. 5", "§ 12").
+	labelHeadingRe = regexp.MustCompile(`^(?:§\s*|\p{L}{2,15}\.?\s+)(\d+[a-z]?|\p{Lu}\d*)\b`)
 )
 
+// isLabelHeading reports whether text opens with a label and its number. A decimal or
+// version ("Version 2.1", "Wert 3,5") has the same shape and is rejected.
 func isLabelHeading(text string) bool {
 	m := labelHeadingRe.FindStringSubmatchIndex(text)
 	if m == nil {
@@ -20,14 +25,19 @@ func isLabelHeading(text string) bool {
 	return !(len(rest) >= 2 && (rest[0] == '.' || rest[0] == ',') && rest[1] >= '0' && rest[1] <= '9')
 }
 
+// classifyHeading decides whether lines[i] is a heading. level 0 means "rank by
+// font size"; numbered reports that the level comes from the numbering; absorb is
+// the number of following lines merged into the heading.
 func classifyHeading(lines []line, i int, st docStats, chapterSeq map[int]bool) (level int, text string, ok bool, numbered bool, absorb int) {
 	ln := lines[i]
 	text = strings.TrimSpace(ln.text)
 	if len(text) < 3 || len(text) > 200 {
 		return 0, "", false, false, 0
 	}
+	// prominent: more than 5% above the body size.
 	prominent := ln.fontSize > st.bodySize+0.05*st.bodySize
 
+	// A numbered heading set after a bullet glyph; the length cap keeps bulleted prose out.
 	if bare := stripBullet(text); bare != text {
 		if m := outlineHeadingRe.FindStringSubmatch(bare); m != nil {
 			if number, title := m[1], strings.TrimSpace(m[3]); strings.Contains(number, ".") && len(title) <= maxBulletedHeadingLen {
@@ -42,6 +52,7 @@ func classifyHeading(lines []line, i int, st docStats, chapterSeq map[int]bool) 
 		switch {
 		case dotted:
 			return clampLevel(strings.Count(number, ".") + 1), text, true, true, 0
+		// A bare integer is ambiguous with list items and prose, so it needs prominence, bold, or a place in the chapter sequence.
 		case !strings.HasSuffix(title, ".") && (prominent || (punct == "" && ln.bold)):
 			return 1, text, true, true, 0
 		case chapterSeq[i]:
@@ -57,23 +68,25 @@ func classifyHeading(lines []line, i int, st docStats, chapterSeq map[int]bool) 
 		}
 	}
 
+	// Small text next to a table is a caption or cell, not a heading.
 	if !prominent && (atTable(lines, i-1) || atTable(lines, i+1)) {
 		return 0, "", false, false, 0
 	}
 
-	var prev, next *line
-	for k := i - 1; k >= 0; k-- {
-		if !lines[k].pre {
-			prev = &lines[k]
-			break
+	// A table beside the line counts as a neighbour of body text. Skipping it would
+	// measure a heading over a table against the heading under it.
+	neighbour := func(k int) *line {
+		if k < 0 || k >= len(lines) {
+			return nil
 		}
-	}
-	for k := i + 1; k < len(lines); k++ {
-		if !lines[k].pre {
-			next = &lines[k]
-			break
+		nb := lines[k]
+		if nb.pre {
+			nb.text, nb.fontSize, nb.bold = "", st.bodySize, false
 		}
+		return &nb
 	}
+	prev, next := neighbour(i-1), neighbour(i+1)
+	// Unnumbered headings are scored against their neighbours; the weights are empirical.
 	score := neighborCombined(ln, prev, next) + st.sizeBoost(ln.fontSize)*0.5
 	if ln.bold {
 		score += st.weightBoost * 0.3
@@ -90,10 +103,15 @@ func classifyHeading(lines []line, i int, st docStats, chapterSeq map[int]bool) 
 	return 0, "", false, false, 0
 }
 
+// maxChapterOpeningLen is the longest plain "4 Title" line accepted as a chapter opening; longer is prose.
 const maxChapterOpeningLen = 80
 
 const maxBulletedHeadingLen = 120
 
+// chapterSequence finds chapter openings ("4 Architecture") set in the body face with
+// no prominence. A plain candidate is accepted only when its number is exactly the
+// successor of the current chapter, which separates it from prose starting with a
+// number. It returns the indices of the lines to promote.
 func chapterSequence(lines []line, st docStats) map[int]bool {
 	promote := map[int]bool{}
 	chapter := 0
@@ -133,9 +151,13 @@ func chapterSequence(lines []line, st docStats) map[int]bool {
 
 var (
 	sectionNumberOnlyRe = regexp.MustCompile(`^\d+(?:\.\d+)+\.?$`)
-	gluedOutlineRe      = regexp.MustCompile(`\s(\d+(?:\.\d+)+)\s+\p{Lu}`)
+	// gluedOutlineRe finds a dotted number inside a line, where a rendering ran sub-headings together.
+	gluedOutlineRe = regexp.MustCompile(`\s(\d+(?:\.\d+)+)\s+\p{Lu}`)
 )
 
+// isStrandedSectionNumber reports whether a line is only a dotted number whose
+// chapter exists in the document: the tail of a reference torn across lines. The
+// chapter test keeps dates ("21.07.2013") and versions ("0.1") out.
 func isStrandedSectionNumber(text string, chapterMajors map[string]bool) bool {
 	if !sectionNumberOnlyRe.MatchString(text) {
 		return false
@@ -143,7 +165,10 @@ func isStrandedSectionNumber(text string, chapterMajors map[string]bool) bool {
 	return chapterMajors[strings.SplitN(text, ".", 2)[0]]
 }
 
-func splitGluedHeading(level int, title string) []block {
+// splitGluedHeading splits a heading that ran a chapter and its sub-headings
+// together ("3 Scope 3.1 Aims") at embedded numbers of the same chapter. Parts
+// take their level from their number, moved down by shift (see titleShift).
+func splitGluedHeading(level, shift int, title string) []block {
 	whole := []block{{kind: kindHeading, level: level, text: title}}
 	m := outlineHeadingRe.FindStringSubmatch(title)
 	if m == nil {
@@ -174,7 +199,7 @@ func splitGluedHeading(level int, title string) []block {
 		}
 		lvl := level
 		if pm := outlineHeadingRe.FindStringSubmatch(part); pm != nil {
-			lvl = clampLevel(strings.Count(pm[1], ".") + 1)
+			lvl = clampLevel(strings.Count(pm[1], ".") + 1 + shift)
 		}
 		out = append(out, block{kind: kindHeading, level: lvl, text: part})
 	}
@@ -184,6 +209,7 @@ func splitGluedHeading(level int, title string) []block {
 	return out
 }
 
+// stripBullet removes a leading bullet or dash that is followed by whitespace.
 func stripBullet(text string) string {
 	for _, m := range []string{"•", "*", "-", "+", "–", "—"} {
 		if rest, ok := strings.CutPrefix(text, m); ok {
@@ -199,6 +225,9 @@ func atTable(lines []line, k int) bool {
 	return k >= 0 && k < len(lines) && lines[k].pre
 }
 
+// labelledHeading handles label headings ("Art. 5 [Title]") whose bracketed title may
+// wrap onto up to two following lines (absorb). A bare label followed by a "(1)"
+// paragraph also counts. The level is fixed at 3.
 func labelledHeading(lines []line, i int, text string) (level int, txt string, absorb int, ok bool) {
 	next := func(k int) string {
 		if k < len(lines) && !lines[k].pre {
@@ -234,8 +263,10 @@ func labelledHeading(lines []line, i int, text string) (level int, txt string, a
 	return 0, "", 0, false
 }
 
+// bareLabelRe matches a label and number with nothing else on the line.
 var bareLabelRe = regexp.MustCompile(`^(?:§\s*|\p{L}{2,15}\.?\s+)\d+[a-z]?$`)
 
+// neighborCombined takes the lower score against the previous and next line, so a line must stand out from both.
 func neighborCombined(cur line, prev, next *line) float64 {
 	switch {
 	case prev != nil && next != nil:
@@ -248,6 +279,8 @@ func neighborCombined(cur line, prev, next *line) float64 {
 	return 0
 }
 
+// neighborScore rates how heading-like cur is next to nb: larger, bolder, upper-case or
+// set apart by space adds points; a larger or bolder neighbour subtracts.
 func neighborScore(cur, nb line) float64 {
 	fs := maxF(cur.fontSize, nb.fontSize)
 	if fs == 0 {
@@ -279,6 +312,7 @@ func neighborScore(cur, nb line) float64 {
 	return s
 }
 
+// clampLevel limits a level to Markdown's 1-6.
 func clampLevel(l int) int {
 	if l < 1 {
 		return 1
@@ -287,4 +321,75 @@ func clampLevel(l int) int {
 		return 6
 	}
 	return l
+}
+
+// minTitlePages is how many pages must open with lines of one prominent size before
+// that size is taken for page titles.
+const minTitlePages = 3
+
+// maxTitleLines is the most lines a page title may wrap over.
+const maxTitleLines = 3
+
+// pageTitles finds slide-style titles: the first line of a page, set in a prominent
+// size that opens at least minTitlePages pages with mostly different texts (a repeated
+// text is a running head). Such a title often has nothing beside it to stand out
+// against, e.g. on a slide holding only a table or a picture, and the neighbour on the
+// previous page is no measure. The value is the number of following lines the title
+// wraps onto (see titleLines).
+func pageTitles(lines []line, st docStats) map[int]int {
+	bySize := map[float64][]int{}
+	seenPage := map[int]bool{}
+	for i, ln := range lines {
+		text := strings.TrimSpace(ln.text)
+		if seenPage[ln.page] || isImageMarker(text) {
+			continue
+		}
+		seenPage[ln.page] = true
+		if !ln.pre && ln.fontSize > st.bodySize+0.05*st.bodySize && len(text) <= maxChapterOpeningLen {
+			s := roundHalf(ln.fontSize)
+			bySize[s] = append(bySize[s], i)
+		}
+	}
+	titles := map[int]int{}
+	for _, idx := range bySize {
+		if len(idx) < minTitlePages {
+			continue
+		}
+		texts := map[string]bool{}
+		extra := make([]int, len(idx))
+		for k, i := range idx {
+			extra[k] = titleLines(lines, i)
+			t := strings.TrimSpace(lines[i].text)
+			for e := 1; e <= extra[k]; e++ {
+				t += " " + strings.TrimSpace(lines[i+e].text)
+			}
+			texts[t] = true
+		}
+		if 4*len(texts) < 3*len(idx) {
+			continue
+		}
+		for k, i := range idx {
+			titles[i] = extra[k]
+		}
+	}
+	return titles
+}
+
+// titleLines counts the lines after lines[i] that continue it as a wrapped title:
+// same page and size, set at about the line pitch of that size (a separate element
+// below the title keeps more distance), and not a numbered heading of their own.
+func titleLines(lines []line, i int) int {
+	n := 0
+	for k := i + 1; k < len(lines) && n < maxTitleLines-1; k++ {
+		prev, cur := lines[k-1], lines[k]
+		size := roundHalf(cur.fontSize)
+		text := strings.TrimSpace(cur.text)
+		gap := prev.y - cur.y
+		if cur.pre || cur.page != prev.page || size != roundHalf(lines[i].fontSize) ||
+			gap <= 0 || gap > 1.5*size || isImageMarker(text) || outlineHeadingRe.MatchString(text) {
+			break
+		}
+		n++
+	}
+	return n
 }

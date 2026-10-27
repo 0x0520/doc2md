@@ -204,3 +204,231 @@ func TestGolden_TOCPageDropped(t *testing.T) {
 	}}
 	assertGolden(t, "toc_page_dropped", renderSynth(t, toc, content))
 }
+
+func TestGolden_NumberedListHangingIndent(t *testing.T) {
+	item := func(marker, text string, yTop float64) []textRun {
+		return []textRun{
+			{text: marker, x: 72, yTop: yTop, size: 10},
+			{text: text, x: 90, yTop: yTop, size: 10},
+		}
+	}
+	runs := []textRun{{text: "Requirements", x: 72, yTop: 110, size: 15, bold: true}}
+	runs = append(runs, item("•", "Every upload is checked for size and type.", 140)...)
+	runs = append(runs, item("•", "Rejected files are reported to the sender.", 140+bodyLead)...)
+	runs = append(runs, item("1.", "Receive the file and check that it is", 140+2.5*bodyLead)...)
+	runs = append(runs, textRun{text: "complete before anything else.", x: 90, yTop: 140 + 3.5*bodyLead, size: 10})
+	runs = append(runs, item("2.", "Validate the content.", 140+4.5*bodyLead)...)
+	runs = append(runs, item("3.", "Store the result.", 140+5.5*bodyLead)...)
+	runs = append(runs, textRun{text: "The following table lists the status values.", x: 72, yTop: 140 + 6.5*bodyLead, size: 10})
+	assertGolden(t, "numbered_list_hanging_indent", renderSynth(t, synthPage{runs: runs}))
+}
+
+// TestGolden_ParagraphSpacing sets paragraphs apart by less than a line, as word
+// processors do with space after a paragraph.
+func TestGolden_ParagraphSpacing(t *testing.T) {
+	runs := []textRun{{text: "Two-column section", x: 72, yTop: 110, size: 15, bold: true}}
+	y := 140.0
+	for p := 1; p <= 3; p++ {
+		for k, s := range []string{
+			"Paragraph " + string(rune('0'+p)) + " of the section.",
+			"It is long enough to wrap over several",
+			"lines in a narrow column of the page.",
+		} {
+			if k > 0 {
+				y += bodyLead
+			}
+			runs = append(runs, textRun{text: s, x: 72, yTop: y, size: 10})
+		}
+		y += bodyLead + 6
+	}
+	assertGolden(t, "paragraph_spacing", renderSynth(t, synthPage{runs: runs}))
+}
+
+// TestGolden_SlideTitles is a slide deck exported to PDF: every content slide opens
+// with its title in one size, but a slide holding only a table or a picture gives the
+// title nothing to stand out against.
+func TestGolden_SlideTitles(t *testing.T) {
+	title := func(s string) textRun { return textRun{text: s, x: 50, yTop: 80, size: 26} }
+	md := renderSynth(t,
+		synthPage{runs: []textRun{
+			{text: "Release Review", x: 150, yTop: 300, size: 32},
+			{text: "Status of the import service", x: 170, yTop: 340, size: 16},
+		}},
+		synthPage{runs: []textRun{
+			title("Highlights"),
+			{text: "• Faster uploads", x: 60, yTop: 140, size: 16},
+			{text: "• Fewer errors", x: 60, yTop: 170, size: 16},
+			{text: "• New validation rules", x: 60, yTop: 200, size: 16},
+		}},
+		synthPage{runs: []textRun{
+			title("Numbers"),
+			{text: "Metric", x: 60, yTop: 140, size: 14}, {text: "Before", x: 200, yTop: 140, size: 14}, {text: "After", x: 320, yTop: 140, size: 14},
+			{text: "Errors", x: 60, yTop: 170, size: 14}, {text: "12", x: 200, yTop: 170, size: 14}, {text: "3", x: 320, yTop: 170, size: 14},
+			{text: "Time", x: 60, yTop: 200, size: 14}, {text: "40 s", x: 200, yTop: 200, size: 14}, {text: "9 s", x: 320, yTop: 200, size: 14},
+		}},
+		synthPage{runs: []textRun{
+			title("Diagram"),
+			{text: "A free text box next to the picture.", x: 300, yTop: 150, size: 12},
+		}},
+	)
+	assertGolden(t, "slide_titles", md)
+}
+
+// TestGolden_TitleOverNumberedChapters has an unnumbered document title clearly
+// larger than the numbered chapters, so the chapters move down one level.
+func TestGolden_TitleOverNumberedChapters(t *testing.T) {
+	md := renderSynth(t, synthPage{runs: []textRun{
+		{text: "Product Specification", x: 72, yTop: 100, size: 24},
+		{text: "1 Introduction", x: 72, yTop: 150, size: 16},
+		{text: "This document describes the import service.", x: 72, yTop: 180, size: 10},
+		{text: "1.1 Scope", x: 72, yTop: 220, size: 13},
+		{text: "The service accepts files from three sources.", x: 72, yTop: 250, size: 10},
+		{text: "2 Requirements", x: 72, yTop: 290, size: 16},
+		{text: "Every upload is checked for size and type.", x: 72, yTop: 320, size: 10},
+	}})
+	assertGolden(t, "title_over_numbered_chapters", md)
+}
+
+func TestGolden_NestedBullets(t *testing.T) {
+	md := renderSynth(t, synthPage{runs: []textRun{
+		{text: "Highlights", x: 72, yTop: 100, size: 15, bold: true},
+		{text: "• Faster uploads", x: 72, yTop: 130, size: 10},
+		{text: "• New validation rules", x: 72, yTop: 130 + bodyLead, size: 10},
+		{text: "• Second level point", x: 96, yTop: 130 + 2*bodyLead, size: 10},
+		{text: "• Third level point", x: 120, yTop: 130 + 3*bodyLead, size: 10},
+		{text: "• Back on the first level", x: 72, yTop: 130 + 4*bodyLead, size: 10},
+		{text: "1. Receive the file.", x: 72, yTop: 130 + 6*bodyLead, size: 10},
+		{text: "• Check the size first.", x: 96, yTop: 130 + 7*bodyLead, size: 10},
+		{text: "2. Store the result.", x: 72, yTop: 130 + 8*bodyLead, size: 10},
+	}})
+	assertGolden(t, "nested_bullets", md)
+}
+
+// TestGolden_TwoColumnSection is a balanced two-column section as Word sets it after
+// a continuous section break: a heading over the left column, paragraph 3 wrapping
+// from the bottom of the left column to the top of the right one, then a heading and
+// a table in one column below.
+func TestGolden_TwoColumnSection(t *testing.T) {
+	paras := [][]string{
+		{"Paragraph 1 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+		{"Paragraph 2 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+		{"Paragraph 3 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across the columns is tested", "properly, even when it is cut in two."},
+		{"Paragraph 4 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+		{"Paragraph 5 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+	}
+	const top, colH = 140.0, 12
+	runs := []textRun{{text: "4 Two-column section", x: 72, yTop: 110, size: 15}}
+	n, y := 0, top
+	for p, lines := range paras {
+		if p > 0 && n != colH {
+			y += 6
+		}
+		for _, s := range lines {
+			x := 72.0
+			if n == colH {
+				y = top
+			}
+			if n >= colH {
+				x = 320
+			}
+			runs = append(runs, textRun{text: s, x: x, yTop: y, size: 10})
+			y += bodyLead
+			n++
+		}
+	}
+	runs = append(runs, textRun{text: "5 Long table", x: 72, yTop: 380, size: 15})
+	for r, cells := range [][]string{{"ID", "Name", "Amount"}, {"R1", "Item number 1", "12,50"}, {"R2", "Item number 2", "25,00"}} {
+		for c, s := range cells {
+			runs = append(runs, textRun{text: s, x: 72 + float64(c)*160, yTop: 410 + float64(r)*bodyLead, size: 10})
+		}
+	}
+	assertGolden(t, "two_column_section", renderSynth(t, synthPage{runs: runs}))
+}
+
+// TestGolden_SlideTitlesTwoLines has slide titles wrapped onto a second line in the
+// title size; the body below keeps its distance and its own size.
+func TestGolden_SlideTitlesTwoLines(t *testing.T) {
+	slide := func(title []string, body string) synthPage {
+		var runs []textRun
+		for i, s := range title {
+			runs = append(runs, textRun{text: s, x: 50, yTop: 80 + float64(i)*30, size: 26})
+		}
+		return synthPage{runs: append(runs,
+			textRun{text: body, x: 60, yTop: 200, size: 16},
+			textRun{text: "• The details are in the appendix of the report", x: 60, yTop: 240, size: 16},
+		)}
+	}
+	md := renderSynth(t,
+		slide([]string{"Highlights"}, "• Uploads are faster than in the last release"),
+		slide([]string{"Numbers from the first", "quarter of the year"}, "• Errors went down from twelve to three"),
+		slide([]string{"Diagram of the import", "flow"}, "• The picture shows the flow of a single file"),
+		slide([]string{"Next steps"}, "• The next review takes place in May"),
+	)
+	assertGolden(t, "slide_titles_two_lines", md)
+}
+
+// TestGolden_OutlineLetters is Word's default outline numbering "1)", "a)", "i)": each
+// marker is its own item, nested by its indent.
+func TestGolden_OutlineLetters(t *testing.T) {
+	md := renderSynth(t, synthPage{runs: []textRun{
+		{text: "Outline numbering", x: 72, yTop: 100, size: 15, bold: true},
+		{text: "1) First level", x: 72, yTop: 130, size: 10},
+		{text: "a) Second level", x: 90, yTop: 130 + bodyLead, size: 10},
+		{text: "b) Second level again", x: 90, yTop: 130 + 2*bodyLead, size: 10},
+		{text: "i) Third level", x: 108, yTop: 130 + 3*bodyLead, size: 10},
+		{text: "ii) Third level again", x: 108, yTop: 130 + 4*bodyLead, size: 10},
+		{text: "2) First level again", x: 72, yTop: 130 + 5*bodyLead, size: 10},
+	}})
+	assertGolden(t, "outline_letters", md)
+}
+
+// TestGolden_HeadingsAroundTable has headings in one size and weight around a table:
+// the table between them is their neighbour, not the heading on its other side.
+func TestGolden_HeadingsAroundTable(t *testing.T) {
+	runs := []textRun{
+		{text: "Overview", x: 72, yTop: 100, size: 15},
+		{text: "The report lists the states of an entry.", x: 72, yTop: 125, size: 10},
+		{text: "Status values", x: 72, yTop: 160, size: 15},
+	}
+	runs = append(runs, statusTable(185)...)
+	runs = append(runs,
+		textRun{text: "Deadlines", x: 72, yTop: 250, size: 15},
+		textRun{text: "The deadlines apply from receipt of the report.", x: 72, yTop: 275, size: 10},
+	)
+	assertGolden(t, "headings_around_table", renderSynth(t, synthPage{runs: runs}))
+}
+
+// noteRuns sets text, then a superscript note mark directly after it, then more text,
+// with x positions from the same width estimate the reader falls back to.
+func noteRuns(x, yTop float64, before, mark, after string) []textRun {
+	mx := x + estimateWidth(before, 10)
+	ax := mx + estimateWidth(mark, 6)
+	if !strings.HasPrefix(after, ".") {
+		ax += estimateWidth(" ", 10)
+	}
+	return []textRun{
+		{text: before, x: x, yTop: yTop, size: 10},
+		{text: mark, x: mx, yTop: yTop - 3.5, size: 6},
+		{text: after, x: ax, yTop: yTop, size: 10},
+	}
+}
+
+// TestGolden_Footnotes has a footnote at the foot of page 1 (its label alone on a row
+// above the note, where it would pass for a page number) and an endnote on page 2.
+// Both become references numbered in order and definitions at the end.
+func TestGolden_Footnotes(t *testing.T) {
+	p1 := []textRun{{text: "Notes", x: 72, yTop: 100, size: 15, bold: true}}
+	p1 = append(p1, noteRuns(72, 130, "A sentence with a footnote", "1", "and more text.")...)
+	p1 = append(p1,
+		textRun{text: "The paragraph goes on here.", x: 72, yTop: 130 + bodyLead, size: 10},
+		textRun{text: "1", x: 72, yTop: 776.5, size: 6},
+		textRun{text: "The footnote text.", x: 76, yTop: 780, size: 8},
+	)
+	p2 := noteRuns(72, 100, "A second page with an endnote", "i", ".")
+	p2 = append(p2,
+		textRun{text: "i", x: 72, yTop: 296.5, size: 6},
+		textRun{text: "The endnote text wraps", x: 76, yTop: 300, size: 8},
+		textRun{text: "onto a second line.", x: 76, yTop: 310, size: 8},
+	)
+	assertGolden(t, "footnotes", renderSynth(t, synthPage{runs: p1}, synthPage{runs: p2}))
+}

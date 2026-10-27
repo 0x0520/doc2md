@@ -11,7 +11,10 @@ func md(t *testing.T, in string) string {
 	if err != nil {
 		t.Fatalf("ToMarkdown: %v", err)
 	}
-	return got
+	if !strings.HasSuffix(got, "\n") || strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("output must end with exactly one newline: %q", got)
+	}
+	return strings.TrimSuffix(got, "\n")
 }
 
 func TestToMarkdown_Structure(t *testing.T) {
@@ -54,7 +57,7 @@ func TestToMarkdown_Table(t *testing.T) {
 func TestToMarkdown_Lists(t *testing.T) {
 	got := md(t, `<ul><li>first<ul><li>nested</li></ul></li><li>second</li></ul>
 	  <ol><li>one</li><li>two</li></ol>`)
-	for _, want := range []string{"- first", "  - nested", "- second", "1. one", "1. two"} {
+	for _, want := range []string{"- first", "  - nested", "- second", "1. one", "2. two"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
@@ -146,5 +149,50 @@ func TestToMarkdown_LayoutTable(t *testing.T) {
 	}
 	if strings.Contains(got, "| A ") {
 		t.Errorf("the frame became a pipe table:\n%s", got)
+	}
+}
+
+func TestToMarkdown_Charset(t *testing.T) {
+	// A UTF-8 page whose first KB is ASCII only must not be taken for windows-1252.
+	late := "<p>" + strings.Repeat("x", 2000) + " Grüße</p>"
+	tests := []struct {
+		name, in, want string
+	}{
+		{"http-equiv windows-1252",
+			"<html><head><meta http-equiv=Content-Type content=\"text/html; charset=windows-1252\"></head><body><p>Gr\xfc\xdfe \x93quoted\x94 \x80</p></body></html>",
+			"Grüße “quoted” €"},
+		{"meta charset", "<meta charset=iso-8859-1><p>Sch\xf6n</p>", "Schön"},
+		{"meta charset utf-8 stays", "<meta charset=utf-8><p>Schön</p>", "Schön"},
+		{"UTF-8 BOM", "\xef\xbb\xbf<p>Schön</p>", "Schön"},
+		{"UTF-16LE BOM", "\xff\xfe<\x00p\x00>\x00\xf6\x00<\x00/\x00p\x00>\x00", "ö"},
+		{"XML declaration", "<?xml version='1.0' encoding='ISO-8859-1'?><html><body><p>Sch\xf6n</p></body></html>", "Schön"},
+		{"undeclared UTF-8 beyond the first KB", late, strings.Repeat("x", 2000) + " Grüße"},
+		{"undeclared and not UTF-8 falls back to windows-1252", "<p>Sch\xf6n</p>", "Schön"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := md(t, tc.in)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToMarkdown_ActiveSchemeLinks(t *testing.T) {
+	for _, href := range []string{
+		"javascript:alert(1)", "JavaScript:alert(1)", "JAVASCRIPT:x", "  javascript:x", "\tjavascript:x",
+		"\x01javascript:x", "java\nscript:x", "vbscript:x", "VBScript:x", "data:text/html;base64,AAAA", "DATA:text/html,x",
+	} {
+		got := md(t, `<p><a href="`+href+`">label</a></p>`)
+		if got != "label" {
+			t.Errorf("href %q: got %q, want the bare label", href, got)
+		}
+	}
+	for _, href := range []string{"https://example.org/data:x", "mailto:a@example.org", "datasheet.html", "#javascript:x"} {
+		got := md(t, `<p><a href="`+href+`">label</a></p>`)
+		if got != "[label]("+href+")" {
+			t.Errorf("href %q: link lost: %q", href, got)
+		}
 	}
 }

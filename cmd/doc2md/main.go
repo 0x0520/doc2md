@@ -1,3 +1,23 @@
+// Command doc2md converts a document to Markdown. The format comes from the file
+// extension, or from the document's bytes when reading stdin.
+//
+// Usage:
+//
+//	doc2md [flags] <file>      convert a file
+//	doc2md [flags] -           read the document from stdin
+//	doc2md serve [flags]       run the HTTP service and web UI
+//	doc2md -version            print the version
+//
+// Flags:
+//
+//	-o <file>       write Markdown to <file> (default: stdout)
+//	-images <dir>   extract figures into <dir> as image-<seq>.<ext>
+//	-name <file>    original filename for piped input (AsciiDoc, CSV)
+//	-verbatim       keep everything a PDF conversion normally drops
+//
+// Example:
+//
+//	doc2md -o report.md -images ./figs report.pdf
 package main
 
 import (
@@ -12,6 +32,7 @@ import (
 )
 
 func main() {
+	// "serve" is a subcommand, checked before flag parsing so it has its own flags.
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		if err := serveCommand(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "doc2md serve:", err)
@@ -44,12 +65,15 @@ func main() {
 	}
 }
 
+// run converts input ("-" for stdin) and writes the Markdown and, if imagesDir is
+// set, the figures. given overrides the filename used for format dispatch.
 func run(input, outPath, imagesDir, given string, verbatim bool) error {
 	data, err := readInput(input)
 	if err != nil {
 		return err
 	}
 
+	// A pipe has no name; an empty one makes Convert identify the format from the bytes.
 	name := given
 	if name == "" && input != "-" {
 		name = filepath.Base(input)
@@ -84,6 +108,8 @@ func writeMarkdown(outPath, md string) error {
 	return os.WriteFile(outPath, []byte(md), 0o644)
 }
 
+// writeImages writes each figure as image-<seq>.<ext>; the Seq matches the
+// "[Image: N]" marker in the Markdown.
 func writeImages(dir string, images []doc2md.Image) error {
 	if dir == "" || len(images) == 0 {
 		return nil
@@ -122,6 +148,7 @@ supported: .pdf .docx .docm .pptx .pptm .xlsx .xlsm .xls .csv .odt .ods .odp
 `)
 }
 
+// version returns the module version from the build info, or "(devel)" for a local build.
 func version() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok || info.Main.Version == "" {

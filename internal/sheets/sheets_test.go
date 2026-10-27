@@ -63,6 +63,7 @@ line</Data></Cell>
 	}
 }
 
+// Crafted Index and MergeAcross values must not allocate millions of columns.
 func TestSpreadsheetML_HostileIndexBounded(t *testing.T) {
 	xml := `<?xml version="1.0"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
@@ -132,6 +133,7 @@ func xlsxFixture(t *testing.T, build func(*excelize.File)) (*excelize.File, []by
 	return f, data
 }
 
+// Rows that only carry formatting (here A3:A5000) are not read as data rows.
 func TestXLSX_FormattedEmptyRowsAreNotMaterialised(t *testing.T) {
 	f, data := xlsxFixture(t, func(f *excelize.File) {
 		f.SetCellValue("Sheet1", "A1", "H1")
@@ -199,6 +201,7 @@ func TestXLSX_CapStopsReading(t *testing.T) {
 	}
 }
 
+// Skipped empty rows count toward the cell cap, so a distant cell cannot defeat it.
 func TestXLSX_GapRowsCountAgainstCap(t *testing.T) {
 	f, _ := xlsxFixture(t, func(f *excelize.File) {
 		f.SetCellValue("Sheet1", "A1", "top")
@@ -211,5 +214,35 @@ func TestXLSX_GapRowsCountAgainstCap(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Errorf("got %d rows, want 1 — the 48-row gap should have hit the cap", len(rows))
+	}
+}
+
+func TestCSV_Encodings(t *testing.T) {
+	utf16le := []byte{0xFF, 0xFE}
+	for _, r := range "Name\tCity\nAnna\tKöln\n" {
+		utf16le = append(utf16le, byte(r), byte(r>>8))
+	}
+	for name, data := range map[string][]byte{
+		"utf-8 bom":    append([]byte{0xEF, 0xBB, 0xBF}, "Name;City\nAnna;Köln\n"...),
+		"windows-1252": []byte("Name;City\nAnna;K\xf6ln\n"),
+		"utf-16 bom":   utf16le,
+	} {
+		md, _, err := ToMarkdown("people.csv", data)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.HasPrefix(md, "| Name | City |") || !strings.Contains(md, "| Anna | Köln |") {
+			t.Errorf("%s:\n%q", name, md)
+		}
+	}
+}
+
+func TestCSV_DelimiterInsideQuotesIsIgnored(t *testing.T) {
+	md, _, err := ToMarkdown("q.csv", []byte("\"a, b, c\";x\n1;2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md, "| a, b, c | x |") {
+		t.Errorf("got:\n%s", md)
 	}
 }
