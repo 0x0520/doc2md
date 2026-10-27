@@ -498,7 +498,11 @@ func formatNumber(v float64, code string, date1904 bool) string {
 		return strconv.FormatFloat(v, 'E', decimals(plain), 64)
 	}
 	if strings.Contains(plain, "0") || strings.Contains(plain, "#") {
-		return fixed(v, decimals(plain))
+		s := fixed(v, decimals(plain))
+		if strings.Contains(plain, ",") {
+			s = groupThousands(s)
+		}
+		return s
 	}
 	return strconv.FormatFloat(roundSignificant(v), 'f', -1, 64)
 }
@@ -581,4 +585,25 @@ func formatSerial(v float64, lowerCode string, date1904 bool) string {
 func fixed(v float64, decimals int) string {
 	p := math.Pow10(decimals)
 	return strconv.FormatFloat(math.Round(roundSignificant(v)*p)/p, 'f', decimals, 64)
+}
+
+// groupThousands inserts "," every three integer digits, as excelize renders
+// "#,##0" formats for .xlsx, so both workbook formats read the same.
+func groupThousands(s string) string {
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	intPart, frac := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		intPart, frac = s[:i], s[i:]
+	}
+	var b strings.Builder
+	for i, c := range intPart {
+		if i > 0 && (len(intPart)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return sign + b.String() + frac
 }

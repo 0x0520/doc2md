@@ -15,15 +15,15 @@ where headings, tables and reading order matter more than visual fidelity.
 | Format | Package | What is kept |
 |---|---|---|
 | `.pdf` | `internal/pdfnative` | reading order across columns, headings from size and weight, tables (including wrapped and cross-page cells), raster figures as `[Image: N]` markers; cover page, table of contents and running headers/footers are dropped |
-| `.docx` `.docm` | `internal/ooxml` | headings from the style outline level (language-independent), font size as a fallback for documents without heading styles, lists, tables, links, pictures |
-| `.pptx` `.pptm` | `internal/ooxml` | slide titles as headings, text boxes, tables, pictures |
+| `.docx` `.docm` | `internal/ooxml` | title and headings from styles (language-independent), font size as a fallback for documents without heading styles, bullet and numbered lists (also through list styles), bold/italic/strikethrough, tables, links, field results such as caption numbers, pictures; the table of contents is dropped |
+| `.pptx` `.pptm` | `internal/ooxml` | slides in presentation order, titles as headings, body placeholders as nested bullet lists, text boxes, tables, pictures |
 | `.xlsx` `.xlsm` | `internal/sheets` | one heading and table per sheet with formatted cell values, pictures after their sheet |
-| `.xls` | `internal/sheets` | legacy BIFF and SpreadsheetML 2003 |
-| `.csv` | `internal/sheets` | delimiter detection (`,` `;` tab `\|`) |
-| `.odt` `.ods` `.odp` | `internal/odf` | OpenDocument text, spreadsheets and presentations, including templates (`.ott` `.ots` `.otp`) |
+| `.xls` | `internal/sheets` | legacy BIFF8 (Excel 97–2003) with formula results, dates and percentages, and SpreadsheetML 2003 |
+| `.csv` | `internal/sheets` | delimiter detection (`,` `;` tab `\|`), UTF-8, UTF-16 and Windows-1252 input |
+| `.odt` `.ods` `.odp` | `internal/odf` | OpenDocument text, spreadsheets and presentations, including templates (`.ott` `.ots` `.otp`): title and headings, bullet and numbered lists, tables, pictures; table of contents and speaker notes dropped |
 | `.epub` | `internal/epub` | chapters in spine order, nested as the navigation document says (EPUB 3 `nav`, EPUB 2 `toc.ncx`) |
-| `.rtf` | `internal/rtf` | headings from outline levels, tables, lists, code pages and Unicode escapes, PNG/JPEG pictures |
-| `.html` `.htm` `.xhtml` | `internal/htmldoc` | headings, tables, lists, links, emphasis, inline `data:` pictures; scripts, styling and navigation dropped |
+| `.rtf` | `internal/rtf` | title and headings from styles and outline levels, tables, bullet and numbered lists, document and font code pages, Unicode escapes, PNG/JPEG pictures; the table of contents is dropped |
+| `.html` `.htm` `.xhtml` | `internal/htmldoc` | headings, tables, lists (including Word's HTML lists), links, emphasis, inline `data:` pictures, any declared charset; scripts, styling, navigation and Word's TOC dropped |
 | `.xml` | `internal/xmldoc` | element tree as headings and labelled values; runs of sibling records as tables |
 | `.adoc` `.asciidoc` | `internal/asciidoc` | sections, tables (`cols=`, spans, `a\|` cells), lists, cross-references, attributes |
 | `.md` `.txt` | | returned unchanged |
@@ -117,7 +117,11 @@ What does not carry over:
 - Only raster figures. Vector drawings (WMF/EMF) are not rasterised; SVG is passed through.
 - No OCR. Scanned PDFs without a text layer produce no text.
 - HTML pictures only when embedded as `data:` URIs.
-- Legacy `.xls` files yield no pictures.
+- Legacy `.xls` files yield no pictures; Excel 95 (BIFF5) and older are not read.
+- Word footnotes, headers and footers are not read. Speaker notes are left out of presentations.
+- `.xlsx` and `.xls` cells are formatted with English separators (`2,878.56`) and
+  ISO 8601 dates, whatever the author's locale. OpenDocument spreadsheets keep the
+  text the authoring application displayed (`2.878,56` from a German Excel).
 - Spreadsheet pictures are listed after their sheet, not inside cells.
 - Logos and icons repeated across most PDF pages are treated as decoration.
 - AsciiDoc `include::` becomes a link; no other file is read.
