@@ -6,6 +6,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -84,7 +85,7 @@ func rewritePDF(data []byte) (out []byte, err error) {
 	conf := model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
 	var dec bytes.Buffer
-	derr := api.Decrypt(bytes.NewReader(data), &dec, conf)
+	derr := api.Decrypt(context.Background(), bytes.NewReader(data), &dec, conf)
 	if derr == nil {
 		return dec.Bytes(), nil
 	}
@@ -94,7 +95,7 @@ func rewritePDF(data []byte) (out []byte, err error) {
 	conf = model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
 	var buf bytes.Buffer
-	if err := api.Optimize(bytes.NewReader(data), &buf, conf); err != nil {
+	if err := api.Optimize(context.Background(), bytes.NewReader(data), &buf, conf, nil); err != nil {
 		return nil, fmt.Errorf("rewrite pdf: %w", err)
 	}
 	return buf.Bytes(), nil

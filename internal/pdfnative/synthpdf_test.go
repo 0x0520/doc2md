@@ -2,6 +2,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -54,7 +55,7 @@ func buildPDF(t testing.TB, pages ...synthPage) []byte {
 	}
 
 	var out bytes.Buffer
-	if err := api.Create(nil, bytes.NewReader(desc), &out, nil); err != nil {
+	if err := api.Create(context.Background(), nil, bytes.NewReader(desc), &out, nil); err != nil {
 		t.Fatalf("pdfcpu create: %v\ndescription: %s", err, desc)
 	}
 	return out.Bytes()

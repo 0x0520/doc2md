@@ -2,6 +2,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -42,7 +43,7 @@ func extractRasterImages(data []byte) (out map[int]map[string]rawImage) {
 	out = map[int]map[string]rawImage{}
 	defer func() { _ = recover() }()
 	conf := pdfcpuConfig()
-	_ = api.ExtractImages(bytes.NewReader(data), nil, func(img model.Image, _ bool, _ int) error {
+	_ = api.ExtractImages(context.Background(), bytes.NewReader(data), nil, func(img model.Image, _ bool, _ int) error {
 		b, err := io.ReadAll(img)
 		if err != nil || len(b) == 0 {
 			return nil

@@ -2,6 +2,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,7 +19,7 @@ func TestRenderReadsPermissionOnlyEncryptedPDF(t *testing.T) {
 	disableConfigDir.Do(api.DisableConfigDir)
 	conf := model.NewAESConfiguration("", "ownerpass", 128)
 	var enc bytes.Buffer
-	if err := api.Encrypt(bytes.NewReader(plain), &enc, conf); err != nil {
+	if err := api.Encrypt(context.Background(), bytes.NewReader(plain), &enc, conf); err != nil {
 		t.Fatalf("encrypt fixture: %v", err)
 	}
 
@@ -44,7 +45,7 @@ func TestRenderRejectsUserPasswordPDF(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var enc bytes.Buffer
-			if err := api.Encrypt(bytes.NewReader(plain), &enc, conf); err != nil {
+			if err := api.Encrypt(context.Background(), bytes.NewReader(plain), &enc, conf); err != nil {
 				t.Fatalf("encrypt fixture: %v", err)
 			}
 			md, err := Extract(enc.Bytes())
