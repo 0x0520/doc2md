@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>doc2md</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+  <header class="bar">
+    <strong class="brand">doc2md</strong>
+    <label class="switch">
+      <input type="checkbox" id="verbatim">
+      <span>Keep everything</span>
+    </label>
+    <span class="hint">cover page, table of contents, running headers</span>
+    <button class="btn btn-primary" type="button" id="again" disabled>Convert again</button>
+  </header>
+
+  <div class="split">
+    <aside class="queue">
+      <div class="queue-head">
+        <span class="label">Documents</span>
+        <span class="muted" id="tallySize">—</span>
+      </div>
+      <div class="tally">
+        <span><i class="dot dot-done"></i><b id="tallyDone">0</b> done</span>
+        <span><i class="dot dot-running"></i><b id="tallyRunning">0</b> running</span>
+        <span><i class="dot dot-failed"></i><b id="tallyFailed">0</b> failed</span>
+      </div>
+      <div class="list" role="listbox" aria-label="Documents" id="list"></div>
+      <div class="drop" id="drop">
+        <input type="file" id="picker" multiple hidden>
+        <button class="btn" type="button" id="add">Add documents</button>
+        <span class="muted">or drop them here</span>
+      </div>
+    </aside>
+
+    <main class="result">
+      <nav class="tabs" role="tablist" aria-label="Result" hidden>
+        <button class="tab is-active" type="button" role="tab" aria-selected="true" data-tab="md">Markdown</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="img">Images <span class="count" id="imgCount">0</span></button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="info">Details</button>
+      </nav>
+      <div class="stage" id="stage"></div>
+      <footer class="foot" hidden>
+        <button class="btn" type="button" id="copy">Copy Markdown</button>
+        <button class="btn" type="button" id="download">Download .md</button>
+        <span class="muted" id="footNote"></span>
+      </footer>
+    </main>
+  </div>
+</div>
+
+<template id="tpl-file">
+  <div class="file" role="option" aria-selected="false" tabindex="0">
+    <span class="fmt"></span>
+    <span class="file-main">
+      <span class="file-name"></span>
+      <span class="file-meta"><span class="file-size"></span><span class="badge"></span></span>
+      <span class="file-error" hidden></span>
+    </span>
+  </div>
+</template>
+
+<template id="tpl-view">
+  <div class="view">
+    <div class="pane" data-pane="md"><pre class="source"></pre></div>
+    <div class="pane" data-pane="img" hidden>
+      <div class="figs"></div>
+      <p class="note" hidden></p>
+    </div>
+    <div class="pane" data-pane="info" hidden>
+      <div class="metrics"></div>
+      <dl class="kv"></dl>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-fig">
+  <figure class="fig">
+    <div class="fig-box"><img alt=""></div>
+    <figcaption><b class="seq"></b> <span class="muted sub"></span></figcaption>
+  </figure>
+</template>
+
+<template id="tpl-metric">
+  <div class="metric">
+    <span class="label"></span>
+    <span class="value"></span>
+    <span class="muted sub"></span>
+  </div>
+</template>
+
+<template id="tpl-message">
+  <div class="message">
+    <h2></h2>
+    <p></p>
+    <button class="btn" type="button" data-act="remove" hidden>Remove from list</button>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>
