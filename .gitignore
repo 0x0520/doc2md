@@ -1,0 +1,6 @@
+/doc2md
+/doc2md.exe
+/dist/
+*.test
+*.out
+.DS_Store

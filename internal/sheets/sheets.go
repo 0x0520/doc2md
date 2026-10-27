@@ -1,0 +1,258 @@
+package sheets
+
+import (
+	"bytes"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+
+	"github.com/0x0520/doc2md/internal/docimg"
+	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/extrame/xls"
+	"github.com/xuri/excelize/v2"
+)
+
+var ErrUnsupported = errors.New("not a supported spreadsheet format")
+
+const maxCellsPerSheet = 4 << 20
+
+func ToMarkdown(filename string, data []byte) (string, []docimg.Image, error) {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".xlsx", ".xlsm":
+		return xlsxToMarkdown(data)
+	case ".xls":
+		if isSpreadsheetML(data) {
+			md, err := spreadsheetMLToMarkdown(data)
+			return md, nil, err
+		}
+		md, err := xlsToMarkdown(data)
+		return md, nil, err
+	case ".csv":
+		md, err := csvToMarkdown(data)
+		return md, nil, err
+	default:
+		return "", nil, ErrUnsupported
+	}
+}
+
+type sheet struct {
+	name    string
+	rows    [][]string
+	figures []string
+	breaks  map[int]string
+}
+
+func render(sheets []sheet, headings bool) (string, error) {
+	var blocks []mdrender.Block
+	for _, s := range sheets {
+		body := renderSheetBody(s)
+		if len(body) == 0 {
+			continue
+		}
+		if headings && s.name != "" {
+			blocks = append(blocks, mdrender.Block{Kind: mdrender.Heading, Level: 2, Text: s.name})
+		}
+		blocks = append(blocks, body...)
+	}
+	if len(blocks) == 0 {
+		return "", fmt.Errorf("no tabular content found")
+	}
+	return mdrender.Document(blocks), nil
+}
+
+func renderSheetBody(s sheet) []mdrender.Block {
+	var blocks []mdrender.Block
+	var acc [][]string
+	flush := func() {
+		grid := mdrender.NormalizeGrid(acc)
+		if len(grid) > 0 {
+			blocks = append(blocks, mdrender.Block{Kind: mdrender.Table_, Text: mdrender.Table(grid)})
+		}
+		acc = nil
+	}
+	for i, row := range s.rows {
+		if text, ok := s.breaks[i]; ok {
+			flush()
+			blocks = append(blocks, mdrender.Block{Kind: mdrender.Heading, Level: 3, Text: text})
+			continue
+		}
+		acc = append(acc, row)
+	}
+	flush()
+	for _, m := range s.figures {
+		blocks = append(blocks, mdrender.Block{Kind: mdrender.Paragraph, Text: m})
+	}
+	return blocks
+}
+
+func xlsxToMarkdown(data []byte) (string, []docimg.Image, error) {
+	f, err := excelize.OpenReader(bytes.NewReader(data))
+	if err != nil {
+		return "", nil, fmt.Errorf("open xlsx: %w", err)
+	}
+	defer f.Close()
+
+	var (
+		sheets []sheet
+		images []docimg.Image
+	)
+	for i, name := range f.GetSheetList() {
+		rows, err := xlsxSheetRows(f, name, maxCellsPerSheet)
+		if err != nil {
+			continue
+		}
+		pics := sheetPictures(f, name, i+1, len(images))
+		markers := make([]string, 0, len(pics))
+		for _, pic := range pics {
+			markers = append(markers, docimg.MarkerFor(pic.Seq))
+		}
+		images = append(images, pics...)
+		sheets = append(sheets, sheet{name: name, rows: rows, figures: markers})
+	}
+	md, err := render(sheets, true)
+	if err != nil {
+		return "", nil, err
+	}
+	return md, images, nil
+}
+
+func xlsxSheetRows(f *excelize.File, name string, maxCells int) ([][]string, error) {
+	it, err := f.Rows(name)
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+
+	var rows [][]string
+	cur, filled, cells := 0, 0, 0
+	for it.Next() {
+		cur++
+		cols, err := it.Columns()
+		if err != nil {
+			break
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		gap := cur - filled - 1
+		if cells+gap+len(cols) > maxCells {
+			break
+		}
+		rows = append(rows, make([][]string, gap)...)
+		rows = append(rows, cols)
+		cells += gap + len(cols)
+		filled = cur
+	}
+	return rows, nil
+}
+
+func xlsToMarkdown(data []byte) (string, error) {
+	wb, err := xls.OpenReader(bytes.NewReader(data), "utf-8")
+	if err != nil {
+		return "", fmt.Errorf("open xls: %w", err)
+	}
+	var sheets []sheet
+	for i := 0; i < wb.NumSheets(); i++ {
+		ws := wb.GetSheet(i)
+		if ws == nil {
+			continue
+		}
+		var rows [][]string
+		for r := 0; r <= int(ws.MaxRow); r++ {
+			row := safeRow(ws, r)
+			if row == nil {
+				rows = append(rows, nil)
+				continue
+			}
+			var cells []string
+			for c := 0; c <= row.LastCol(); c++ {
+				cells = append(cells, row.Col(c))
+			}
+			rows = append(rows, cells)
+		}
+		sheets = append(sheets, sheet{name: ws.Name, rows: rows})
+	}
+	return render(sheets, true)
+}
+
+func safeRow(ws *xls.WorkSheet, i int) (row *xls.Row) {
+	defer func() {
+		if recover() != nil {
+			row = nil
+		}
+	}()
+	return ws.Row(i)
+}
+
+func csvToMarkdown(data []byte) (string, error) {
+	r := csv.NewReader(bytes.NewReader(data))
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true
+	r.Comma = sniffDelimiter(data)
+	var rows [][]string
+	for {
+		rec, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+		rows = append(rows, rec)
+	}
+	return render([]sheet{{rows: rows}}, false)
+}
+
+func sniffDelimiter(data []byte) rune {
+	head := data
+	if i := bytes.IndexByte(head, '\n'); i >= 0 {
+		head = head[:i]
+	}
+	line := string(head)
+	best, bestN := ',', 0
+	for _, d := range []rune{',', ';', '\t', '|'} {
+		if n := strings.Count(line, string(d)); n > bestN {
+			best, bestN = d, n
+		}
+	}
+	return best
+}
+
+const maxPictureBytes = 128 << 20
+
+func sheetPictures(f *excelize.File, name string, sheetNum, alreadyTaken int) []docimg.Image {
+	cells, err := f.GetPictureCells(name)
+	if err != nil {
+		return nil
+	}
+	var (
+		out   []docimg.Image
+		total int
+	)
+	for _, cell := range cells {
+		pics, perr := f.GetPictures(name, cell)
+		if perr != nil {
+			continue
+		}
+		for _, pic := range pics {
+			if total >= maxPictureBytes {
+				return out
+			}
+			ext := docimg.Ext(pic.Extension)
+			if ext == "" || len(pic.File) == 0 {
+				continue
+			}
+			total += len(pic.File)
+			out = append(out, docimg.Image{
+				Seq:   alreadyTaken + len(out) + 1,
+				Page:  sheetNum,
+				Bytes: pic.File,
+				Ext:   ext,
+			})
+		}
+	}
+	return out
+}
