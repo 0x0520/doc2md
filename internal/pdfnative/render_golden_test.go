@@ -273,3 +273,96 @@ func TestGolden_SlideTitles(t *testing.T) {
 	)
 	assertGolden(t, "slide_titles", md)
 }
+
+// TestGolden_TitleOverNumberedChapters has an unnumbered document title clearly
+// larger than the numbered chapters, so the chapters move down one level.
+func TestGolden_TitleOverNumberedChapters(t *testing.T) {
+	md := renderSynth(t, synthPage{runs: []textRun{
+		{text: "Product Specification", x: 72, yTop: 100, size: 24},
+		{text: "1 Introduction", x: 72, yTop: 150, size: 16},
+		{text: "This document describes the import service.", x: 72, yTop: 180, size: 10},
+		{text: "1.1 Scope", x: 72, yTop: 220, size: 13},
+		{text: "The service accepts files from three sources.", x: 72, yTop: 250, size: 10},
+		{text: "2 Requirements", x: 72, yTop: 290, size: 16},
+		{text: "Every upload is checked for size and type.", x: 72, yTop: 320, size: 10},
+	}})
+	assertGolden(t, "title_over_numbered_chapters", md)
+}
+
+func TestGolden_NestedBullets(t *testing.T) {
+	md := renderSynth(t, synthPage{runs: []textRun{
+		{text: "Highlights", x: 72, yTop: 100, size: 15, bold: true},
+		{text: "• Faster uploads", x: 72, yTop: 130, size: 10},
+		{text: "• New validation rules", x: 72, yTop: 130 + bodyLead, size: 10},
+		{text: "• Second level point", x: 96, yTop: 130 + 2*bodyLead, size: 10},
+		{text: "• Third level point", x: 120, yTop: 130 + 3*bodyLead, size: 10},
+		{text: "• Back on the first level", x: 72, yTop: 130 + 4*bodyLead, size: 10},
+		{text: "1. Receive the file.", x: 72, yTop: 130 + 6*bodyLead, size: 10},
+		{text: "• Check the size first.", x: 96, yTop: 130 + 7*bodyLead, size: 10},
+		{text: "2. Store the result.", x: 72, yTop: 130 + 8*bodyLead, size: 10},
+	}})
+	assertGolden(t, "nested_bullets", md)
+}
+
+// TestGolden_TwoColumnSection is a balanced two-column section as Word sets it after
+// a continuous section break: a heading over the left column, paragraph 3 wrapping
+// from the bottom of the left column to the top of the right one, then a heading and
+// a table in one column below.
+func TestGolden_TwoColumnSection(t *testing.T) {
+	paras := [][]string{
+		{"Paragraph 1 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+		{"Paragraph 2 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+		{"Paragraph 3 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across the columns is tested", "properly, even when it is cut in two."},
+		{"Paragraph 4 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+		{"Paragraph 5 of the two-column section is", "long enough to wrap over several", "lines in a narrow column, so the reading", "order across columns is tested properly."},
+	}
+	const top, colH = 140.0, 12
+	runs := []textRun{{text: "4 Two-column section", x: 72, yTop: 110, size: 15}}
+	n, y := 0, top
+	for p, lines := range paras {
+		if p > 0 && n != colH {
+			y += 6
+		}
+		for _, s := range lines {
+			x := 72.0
+			if n == colH {
+				y = top
+			}
+			if n >= colH {
+				x = 320
+			}
+			runs = append(runs, textRun{text: s, x: x, yTop: y, size: 10})
+			y += bodyLead
+			n++
+		}
+	}
+	runs = append(runs, textRun{text: "5 Long table", x: 72, yTop: 380, size: 15})
+	for r, cells := range [][]string{{"ID", "Name", "Amount"}, {"R1", "Item number 1", "12,50"}, {"R2", "Item number 2", "25,00"}} {
+		for c, s := range cells {
+			runs = append(runs, textRun{text: s, x: 72 + float64(c)*160, yTop: 410 + float64(r)*bodyLead, size: 10})
+		}
+	}
+	assertGolden(t, "two_column_section", renderSynth(t, synthPage{runs: runs}))
+}
+
+// TestGolden_SlideTitlesTwoLines has slide titles wrapped onto a second line in the
+// title size; the body below keeps its distance and its own size.
+func TestGolden_SlideTitlesTwoLines(t *testing.T) {
+	slide := func(title []string, body string) synthPage {
+		var runs []textRun
+		for i, s := range title {
+			runs = append(runs, textRun{text: s, x: 50, yTop: 80 + float64(i)*30, size: 26})
+		}
+		return synthPage{runs: append(runs,
+			textRun{text: body, x: 60, yTop: 200, size: 16},
+			textRun{text: "• The details are in the appendix of the report", x: 60, yTop: 240, size: 16},
+		)}
+	}
+	md := renderSynth(t,
+		slide([]string{"Highlights"}, "• Uploads are faster than in the last release"),
+		slide([]string{"Numbers from the first", "quarter of the year"}, "• Errors went down from twelve to three"),
+		slide([]string{"Diagram of the import", "flow"}, "• The picture shows the flow of a single file"),
+		slide([]string{"Next steps"}, "• The next review takes place in May"),
+	)
+	assertGolden(t, "slide_titles_two_lines", md)
+}

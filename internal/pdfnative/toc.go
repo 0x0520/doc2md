@@ -108,7 +108,9 @@ func isTOCPage(rows [][]pdf.Text, pi int, lastPageOf map[string]int, continuatio
 			continue
 		}
 		total++
-		if k := tocEntryKey(text); k != "" && lastPageOf[k] > pi {
+		// Only a row with a page number or leader restates a heading: a row repeated
+		// verbatim is the same content printed again, and dropping it would lose text.
+		if k := tocEntryKey(text); k != "" && lastPageOf[k] > pi && k != strings.ToLower(strings.Join(strings.Fields(text), " ")) {
 			restated++
 		}
 		if !tocPageNumRe.MatchString(text) {

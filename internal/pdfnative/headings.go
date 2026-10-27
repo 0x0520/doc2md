@@ -166,8 +166,9 @@ func isStrandedSectionNumber(text string, chapterMajors map[string]bool) bool {
 }
 
 // splitGluedHeading splits a heading that ran a chapter and its sub-headings
-// together ("3 Scope 3.1 Aims") at embedded numbers of the same chapter.
-func splitGluedHeading(level int, title string) []block {
+// together ("3 Scope 3.1 Aims") at embedded numbers of the same chapter. Parts
+// take their level from their number, moved down by shift (see titleShift).
+func splitGluedHeading(level, shift int, title string) []block {
 	whole := []block{{kind: kindHeading, level: level, text: title}}
 	m := outlineHeadingRe.FindStringSubmatch(title)
 	if m == nil {
@@ -198,7 +199,7 @@ func splitGluedHeading(level int, title string) []block {
 		}
 		lvl := level
 		if pm := outlineHeadingRe.FindStringSubmatch(part); pm != nil {
-			lvl = clampLevel(strings.Count(pm[1], ".") + 1)
+			lvl = clampLevel(strings.Count(pm[1], ".") + 1 + shift)
 		}
 		out = append(out, block{kind: kindHeading, level: lvl, text: part})
 	}
@@ -326,12 +327,16 @@ func clampLevel(l int) int {
 // that size is taken for page titles.
 const minTitlePages = 3
 
+// maxTitleLines is the most lines a page title may wrap over.
+const maxTitleLines = 3
+
 // pageTitles finds slide-style titles: the first line of a page, set in a prominent
 // size that opens at least minTitlePages pages with mostly different texts (a repeated
 // text is a running head). Such a title often has nothing beside it to stand out
 // against, e.g. on a slide holding only a table or a picture, and the neighbour on the
-// previous page is no measure.
-func pageTitles(lines []line, st docStats) map[int]bool {
+// previous page is no measure. The value is the number of following lines the title
+// wraps onto (see titleLines).
+func pageTitles(lines []line, st docStats) map[int]int {
 	bySize := map[float64][]int{}
 	seenPage := map[int]bool{}
 	for i, ln := range lines {
@@ -345,18 +350,46 @@ func pageTitles(lines []line, st docStats) map[int]bool {
 			bySize[s] = append(bySize[s], i)
 		}
 	}
-	titles := map[int]bool{}
+	titles := map[int]int{}
 	for _, idx := range bySize {
-		texts := map[string]bool{}
-		for _, i := range idx {
-			texts[strings.TrimSpace(lines[i].text)] = true
-		}
-		if len(idx) < minTitlePages || 4*len(texts) < 3*len(idx) {
+		if len(idx) < minTitlePages {
 			continue
 		}
-		for _, i := range idx {
-			titles[i] = true
+		texts := map[string]bool{}
+		extra := make([]int, len(idx))
+		for k, i := range idx {
+			extra[k] = titleLines(lines, i)
+			t := strings.TrimSpace(lines[i].text)
+			for e := 1; e <= extra[k]; e++ {
+				t += " " + strings.TrimSpace(lines[i+e].text)
+			}
+			texts[t] = true
+		}
+		if 4*len(texts) < 3*len(idx) {
+			continue
+		}
+		for k, i := range idx {
+			titles[i] = extra[k]
 		}
 	}
 	return titles
+}
+
+// titleLines counts the lines after lines[i] that continue it as a wrapped title:
+// same page and size, set at about the line pitch of that size (a separate element
+// below the title keeps more distance), and not a numbered heading of their own.
+func titleLines(lines []line, i int) int {
+	n := 0
+	for k := i + 1; k < len(lines) && n < maxTitleLines-1; k++ {
+		prev, cur := lines[k-1], lines[k]
+		size := roundHalf(cur.fontSize)
+		text := strings.TrimSpace(cur.text)
+		gap := prev.y - cur.y
+		if cur.pre || cur.page != prev.page || size != roundHalf(lines[i].fontSize) ||
+			gap <= 0 || gap > 1.5*size || isImageMarker(text) || outlineHeadingRe.MatchString(text) {
+			break
+		}
+		n++
+	}
+	return n
 }

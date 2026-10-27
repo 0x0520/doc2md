@@ -16,8 +16,7 @@ func TestRenderReadsPermissionOnlyEncryptedPDF(t *testing.T) {
 	plain := buildPDF(t, synthPage{runs: []textRun{
 		{text: "Minutes of the meeting", x: 72, yTop: 120, size: 10},
 	}})
-	disableConfigDir.Do(api.DisableConfigDir)
-	conf := model.NewAESConfiguration("", "ownerpass", 128)
+	conf := encryptConfig("", "ownerpass", true, 128)
 	var enc bytes.Buffer
 	if err := api.Encrypt(context.Background(), bytes.NewReader(plain), &enc, conf); err != nil {
 		t.Fatalf("encrypt fixture: %v", err)
@@ -36,12 +35,11 @@ func TestRenderRejectsUserPasswordPDF(t *testing.T) {
 	plain := buildPDF(t, synthPage{runs: []textRun{
 		{text: "Minutes of the meeting", x: 72, yTop: 120, size: 10},
 	}})
-	disableConfigDir.Do(api.DisableConfigDir)
 	for name, conf := range map[string]*model.Configuration{
-		"AES-128": model.NewAESConfiguration("userpass", "ownerpass", 128),
-		"AES-256": model.NewAESConfiguration("userpass", "ownerpass", 256),
-		"RC4-40":  model.NewRC4Configuration("userpass", "ownerpass", 40),
-		"RC4-128": model.NewRC4Configuration("userpass", "ownerpass", 128),
+		"AES-128": encryptConfig("userpass", "ownerpass", true, 128),
+		"AES-256": encryptConfig("userpass", "ownerpass", true, 256),
+		"RC4-40":  encryptConfig("userpass", "ownerpass", false, 40),
+		"RC4-128": encryptConfig("userpass", "ownerpass", false, 128),
 	} {
 		t.Run(name, func(t *testing.T) {
 			var enc bytes.Buffer
@@ -146,4 +144,13 @@ func TestDocumentPagesWalksNestedTreeInOrder(t *testing.T) {
 	if len(breaks) != 3 || breaks[2].Page != 3 {
 		t.Errorf("page breaks = %v, want pages 1 to 3", breaks)
 	}
+}
+
+// encryptConfig is pdfcpu's stateless configuration set up to encrypt; the
+// NewAESConfiguration helpers would read or create a config directory on disk.
+func encryptConfig(userPW, ownerPW string, aes bool, keyLength int) *model.Configuration {
+	c := model.NewStatelessConfiguration()
+	c.UserPW, c.OwnerPW = userPW, ownerPW
+	c.EncryptUsingAES, c.EncryptKeyLength = aes, keyLength
+	return c
 }

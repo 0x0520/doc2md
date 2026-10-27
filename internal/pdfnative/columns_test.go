@@ -332,3 +332,17 @@ func TestRenderVerbatimKeepsWhatRenderDrops(t *testing.T) {
 		}
 	}
 }
+
+// TestDropTOCPagesKeepsRepeatedContent covers a document that prints the same section
+// twice: the first copy restates the second word for word, which is not a contents page.
+func TestDropTOCPagesKeepsRepeatedContent(t *testing.T) {
+	row := func(s string) []pdf.Text { return []pdf.Text{{S: s, FontSize: 10}} }
+	var section [][]pdf.Text
+	for i := 1; i <= 10; i++ {
+		section = append(section, row(fmt.Sprintf("Item number %d of the long table", i)))
+	}
+	pages := []page{{rows: section, num: 1}, {rows: section, num: 2}, {rows: section, num: 3}}
+	if kept := dropTOCPages(pages); len(kept) != 3 {
+		t.Errorf("kept %d pages, want all 3: repeated content is not a contents page", len(kept))
+	}
+}

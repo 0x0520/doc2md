@@ -11,7 +11,6 @@ import (
 	_ "image/png"
 	"io"
 	"sort"
-	"sync"
 
 	"github.com/0x0520/doc2md/internal/docimg"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -28,12 +27,10 @@ type rawImage struct {
 	w, h  int
 }
 
-// disableConfigDir guards the one-time call that stops pdfcpu from creating a config directory on disk.
-var disableConfigDir sync.Once
-
+// pdfcpuConfig is pdfcpu's built-in configuration with relaxed validation. It is
+// stateless, so pdfcpu neither reads nor creates a config directory on disk.
 func pdfcpuConfig() *model.Configuration {
-	disableConfigDir.Do(api.DisableConfigDir)
-	conf := model.NewDefaultConfiguration()
+	conf := model.NewStatelessConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
 	return conf
 }

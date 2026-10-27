@@ -27,8 +27,9 @@ type cell struct {
 }
 
 // assembleRows turns rows into lines. Runs of multi-cell rows become one table line
-// (pre set); runs that look like a contents list are dropped unless verbatim.
-func assembleRows(rows [][]pdf.Text, verbatim bool) []line {
+// (pre set); runs that look like a contents list are dropped unless verbatim. Other
+// rows also get their emphasis and the links of the page.
+func assembleRows(rows [][]pdf.Text, verbatim bool, links []linkArea) []line {
 	cells := make([][]cell, len(rows))
 	tabular := make([]bool, len(rows))
 	for i, r := range rows {
@@ -74,7 +75,9 @@ func assembleRows(rows [][]pdf.Text, verbatim bool) []line {
 				}
 			}
 		}
-		out = append(out, joinLine(rows[i]))
+		ln := joinLine(rows[i])
+		ln.rich, ln.linked, ln.styled = richText(rows[i], links)
+		out = append(out, ln)
 		i++
 	}
 	return out

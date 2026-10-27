@@ -52,7 +52,7 @@ func (in *interpreter) font(res pdf.Value, scope, name string) *fontInfo {
 	}
 	font := pdf.Font{V: res.Key("Font").Key(name)}
 	fi := &fontInfo{
-		baseFont: stripSubsetPrefix(font.BaseFont()),
+		baseFont: styledName(stripSubsetPrefix(font.BaseFont()), font),
 		enc:      font.Encoder(),
 		metrics:  buildMetrics(font),
 		decode:   buildDecoder(font),
@@ -269,6 +269,32 @@ type gstate struct {
 	font                *fontInfo
 	tfs, tc, tw, th, tl float64
 	trise               float64
+}
+
+// styledName adds the ",Bold" / ",Italic" style suffix of PDF font names (PDF 32000-1
+// §9.6.2.1) when the font descriptor declares a style the name does not show, so
+// that the name-based checks see it. Bold is a weight of 600 or more or the
+// ForceBold flag; italic is the Italic flag or a slanted italic angle.
+func styledName(name string, font pdf.Font) string {
+	fd := font.V.Key("FontDescriptor")
+	if font.V.Key("Subtype").Name() == "Type0" {
+		fd = font.V.Key("DescendantFonts").Index(0).Key("FontDescriptor")
+	}
+	if fd.IsNull() {
+		return name
+	}
+	flags := fd.Key("Flags").Int64()
+	bold := !isBoldFont(name) && (fd.Key("FontWeight").Float64() >= 600 || flags&(1<<18) != 0)
+	italic := !isItalicFont(name) && (flags&(1<<6) != 0 || fd.Key("ItalicAngle").Float64() != 0)
+	switch {
+	case bold && italic:
+		return name + ",BoldItalic"
+	case bold:
+		return name + ",Bold"
+	case italic:
+		return name + ",Italic"
+	}
+	return name
 }
 
 // stripSubsetPrefix removes the "ABCDEF+" subset tag from a font name.

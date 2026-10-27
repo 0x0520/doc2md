@@ -4,6 +4,9 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/0x0520/doc2md/internal/mdrender"
 )
 
 // listItemRe matches a bullet or numbered list item with text after the marker.
@@ -62,8 +65,14 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 			continue
 		}
 		lvl, txt, ok, numbered, absorb := classifyHeading(lines, i, st, chapterSeq)
-		if !ok && titles[i] {
-			lvl, txt, ok = 0, strings.TrimSpace(lines[i].text), true
+		if extra, title := titles[i]; title && (!ok || absorb == 0) {
+			if !ok {
+				lvl, txt, ok = 0, strings.TrimSpace(lines[i].text), true
+			}
+			for k := 1; k <= extra; k++ {
+				txt += " " + strings.TrimSpace(lines[i+k].text)
+			}
+			absorb = extra
 		}
 		if !ok {
 			continue
@@ -80,6 +89,7 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 	}
 	// Numbered headings take their level from the numbering; the rest are ranked by font size.
 	levelBySize := sizeLevels(headSizes)
+	shift := titleShift(lines, outlineLvl, headSizes)
 
 	// chapterMajors holds the top-level numbers of the chapters found, to recognise a section number left alone on a line.
 	chapterMajors := map[string]bool{}
@@ -93,19 +103,28 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 	}
 
 	var blocks []block
-	var para []string
+	var para inlineText
 	var paraPrev *line
-	var lastListLine *line
-	lastListIdx := -1
-	// listTextX is where the current item's text starts after its marker, 0 if unknown.
-	listTextX := 0.0
 	paraPage := 0
 	flush := func() {
-		if len(para) > 0 {
-			blocks = append(blocks, block{kind: kindParagraph, text: joinWrappedLines(para), page: paraPage})
-			para, paraPrev, paraPage = nil, nil, 0
+		if para.lines > 0 {
+			blocks = append(blocks, block{kind: kindParagraph, text: para.String(), page: paraPage})
+			para, paraPrev, paraPage = inlineText{}, nil, 0
 		}
 	}
+
+	// The current list: its last line, the block of the open item, where the item's
+	// text starts after its marker (0 if unknown), the item's text and marker, and the
+	// marker positions of the enclosing levels.
+	var lastListLine *line
+	lastListIdx := -1
+	listTextX := 0.0
+	var item inlineText
+	itemPrefix := ""
+	var listXs []float64
+	endList := func() { lastListLine, lastListIdx, listXs = nil, -1, nil }
+	setItem := func() { blocks[lastListIdx].text = itemPrefix + item.String() }
+
 	for i := range lines {
 		if skip[i] {
 			continue
@@ -116,54 +135,59 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 		case ln.pre:
 			flush()
 			blocks = append(blocks, block{kind: kindTable, text: ln.text, page: ln.page})
-			lastListLine, lastListIdx = nil, -1
+			endList()
 		case isImageMarker(text):
 			flush()
 			blocks = append(blocks, block{kind: kindParagraph, text: text, page: ln.page})
-			lastListLine, lastListIdx = nil, -1
+			endList()
 		case isHead[i]:
 			flush()
 			lvl := outlineLvl[i]
-			if lvl == 0 {
-				if lvl = levelBySize[roundHalf(ln.fontSize)]; lvl == 0 {
-					lvl = 2
-				}
+			if lvl > 0 {
+				lvl += shift
+			} else if lvl = levelBySize[roundHalf(ln.fontSize)]; lvl == 0 {
+				lvl = 2
 			}
-			for _, h := range splitGluedHeading(lvl, headText[i]) {
+			for _, h := range splitGluedHeading(lvl, shift, headText[i]) {
 				h.page = ln.page
 				blocks = append(blocks, h)
 			}
-			lastListLine, lastListIdx = nil, -1
+			endList()
 		// A dotted number alone on its line is the tail of a reference broken across lines, so it is joined to the text before it.
 		case isStrandedSectionNumber(text, chapterMajors):
 			switch {
-			case len(para) > 0:
-				para[len(para)-1] = joinWrapped(para[len(para)-1], text)
+			case para.lines > 0:
+				para.addPlain(text)
 			case lastListIdx >= 0:
-				blocks[lastListIdx].text = joinWrapped(blocks[lastListIdx].text, text)
+				item.addPlain(text)
+				setItem()
 			case len(blocks) > 0 && blocks[len(blocks)-1].kind == kindParagraph:
 				last := &blocks[len(blocks)-1]
 				last.text = joinWrapped(last.text, text)
 			default:
-				if len(para) == 0 {
-					paraPage = ln.page
-				}
-				para = append(para, text)
+				paraPage = ln.page
+				para.add(ln)
 				cp := ln
 				paraPrev = &cp
 			}
 		case listItemRe.MatchString(text):
 			flush()
-			blocks = append(blocks, block{kind: kindList, text: normalizeListMarker(text), page: ln.page})
+			var bodyLine line
+			itemPrefix, bodyLine = splitListItem(ln, nestLevel(&listXs, ln.xStart, 0.5*maxF(ln.fontSize, body)))
+			item = inlineText{}
+			item.add(bodyLine)
+			blocks = append(blocks, block{kind: kindList, page: ln.page})
 			cp := ln
 			lastListLine, lastListIdx = &cp, len(blocks)-1
+			setItem()
 			listTextX = 0
 			if ln.word2X > ln.xStart {
 				listTextX = ln.word2X
 			}
 		default:
-			if len(para) == 0 && lastListLine != nil && continuesListItem(*lastListLine, ln, body, listTextX, pitches) {
-				blocks[lastListIdx].text = joinWrapped(blocks[lastListIdx].text, text)
+			if para.lines == 0 && lastListLine != nil && continuesListItem(*lastListLine, ln, body, listTextX, pitches) {
+				item.add(ln)
+				setItem()
 				cp := ln
 				lastListLine = &cp
 				continue
@@ -171,18 +195,85 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 			if paraPrev != nil && !sameParagraph(*paraPrev, ln, body, pitches) {
 				flush()
 			}
-			if len(para) == 0 {
+			if para.lines == 0 {
 				paraPage = ln.page
 			}
-			para = append(para, text)
+			para.add(ln)
 			cp := ln
 			paraPrev = &cp
-			lastListLine, lastListIdx = nil, -1
+			endList()
 		}
 	}
 	flush()
 	return mergeAdjacentTables(blocks)
 }
+
+// nestLevel places a list marker at x among the marker positions of the open levels
+// (outermost first) and returns its depth: a marker clearly right of the innermost
+// opens a level, one left of it closes levels down to the one it aligns with.
+func nestLevel(xs *[]float64, x, tol float64) int {
+	s := *xs
+	for len(s) > 0 && s[len(s)-1] > x+tol {
+		s = s[:len(s)-1]
+	}
+	if len(s) == 0 || x > s[len(s)-1]+tol {
+		s = append(s, x)
+	} else {
+		s[len(s)-1] = x
+	}
+	*xs = s
+	return len(s) - 1
+}
+
+// splitListItem returns the Markdown prefix of a list item (two spaces per nesting
+// level, then the marker) and the line with only the item's own text. The marked-up
+// forms are kept only when they start with the same marker as the plain text.
+func splitListItem(ln line, level int) (string, line) {
+	plain := strings.TrimSpace(ln.text)
+	norm := normalizeListMarker(plain)
+	marker, rest, _ := strings.Cut(norm, " ")
+	raw := plain[:len(plain)-len(rest)]
+	body := ln
+	body.text = rest
+	cut := func(s string) string {
+		if r, ok := strings.CutPrefix(s, raw); ok {
+			return strings.TrimSpace(r)
+		}
+		return ""
+	}
+	body.rich, body.linked = cut(ln.rich), cut(ln.linked)
+	return strings.Repeat("  ", level) + marker + " ", body
+}
+
+// titleShift returns how many levels numbered headings move down below unnumbered
+// headings that are clearly larger than every top-level numbered one: a document
+// title above "1 Introduction". The title sizes take the top ranks of sizeLevels.
+func titleShift(lines []line, outlineLvl []int, headSizes []float64) int {
+	top, topSize := 0, 0.0
+	for i, lvl := range outlineLvl {
+		switch {
+		case lvl == 0:
+		case top == 0 || lvl < top:
+			top, topSize = lvl, lines[i].fontSize
+		case lvl == top:
+			topSize = maxF(topSize, lines[i].fontSize)
+		}
+	}
+	if top == 0 {
+		return 0
+	}
+	larger := map[float64]bool{}
+	for _, s := range headSizes {
+		if s > titleSizeFactor*topSize {
+			larger[s] = true
+		}
+	}
+	return max(0, len(larger)-(top-1))
+}
+
+// titleSizeFactor is how much larger than the top numbered headings an unnumbered
+// heading must be to rank above them; similar sizes are a design choice, not a level.
+const titleSizeFactor = 1.15
 
 // mergeAdjacentTables joins consecutive tables with identical header rows, i.e. one
 // table that continued over a page break.
@@ -223,17 +314,32 @@ func sameParagraph(prev, cur line, body float64, pitches map[float64]float64) bo
 	if fs == 0 {
 		fs = 10
 	}
-	norm := (prev.y - cur.y) / fs
-	if norm < 0.35 || norm > 2.55 || paragraphSpaced(prev, cur, pitches) {
+	if !within(prev.fontSize, cur.fontSize, 0.12) {
 		return false
 	}
-	if !within(prev.fontSize, cur.fontSize, 0.12) {
+	if nextColumn(prev, cur, fs) {
+		return true
+	}
+	norm := (prev.y - cur.y) / fs
+	if norm < 0.35 || norm > 2.55 || paragraphSpaced(prev, cur, pitches) {
 		return false
 	}
 	if absF(prev.xStart-cur.xStart) <= 1.5*fs {
 		return true
 	}
 	return hangingNumRe.MatchString(prev.text) && absF(prev.xStart-cur.xStart) <= 4*fs
+}
+
+// nextColumn reports whether cur continues prev's paragraph at the top of the next
+// column: higher up on the same page and well to the right, after a line that ends
+// without a full stop or before one that starts in lowercase.
+func nextColumn(prev, cur line, fs float64) bool {
+	if prev.page != cur.page || cur.y <= prev.y+fs || cur.xStart < prev.xStart+colMinWidthFS*fs/2 {
+		return false
+	}
+	last, _ := utf8.DecodeLastRuneInString(strings.TrimSpace(prev.text))
+	first, _ := utf8.DecodeRuneInString(strings.TrimSpace(cur.text))
+	return !strings.ContainsRune(".!?:", last) || unicode.IsLower(first)
 }
 
 var hangingNumRe = regexp.MustCompile(`^\(\d{1,3}[a-z]?\)\s`)
@@ -304,18 +410,6 @@ func linePitches(lines []line) map[float64]float64 {
 	return out
 }
 
-// joinWrappedLines joins wrapped lines into one paragraph, repairing hyphenation.
-func joinWrappedLines(parts []string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	out := parts[0]
-	for _, p := range parts[1:] {
-		out = joinWrapped(out, p)
-	}
-	return out
-}
-
 // joinWrapped appends next to acc: a soft hyphen is removed, and a hard hyphen only
 // before a lowercase letter (before a capital the word is a compound and keeps it).
 func joinWrapped(acc, next string) string {
@@ -366,31 +460,47 @@ func normalizeListMarker(text string) string {
 }
 
 // renderWithBreaks serialises blocks to Markdown and records the byte offset where
-// each source page begins. Consecutive list items are separated by a single newline,
-// unless they switch between bullets and numbers: a "2." right under a bullet item
-// would be read as a lazy continuation of that item, not as a new list.
+// each source page begins. A run of list items goes through mdrender.Document, which
+// keeps the items on adjacent lines, separates bullets from numbers and indents
+// nested items to their parent's content column as CommonMark requires.
 func renderWithBreaks(blocks []block) (string, []PageBreak) {
 	var b strings.Builder
 	var breaks []PageBreak
 	lastPage := 0
-	for i, blk := range blocks {
-		if blk.page > 0 && blk.page != lastPage {
-			breaks = append(breaks, PageBreak{Offset: b.Len(), Page: blk.page})
-			lastPage = blk.page
+	mark := func(page, offset int) {
+		if page > 0 && page != lastPage {
+			breaks = append(breaks, PageBreak{Offset: offset, Page: page})
+			lastPage = page
 		}
+	}
+	for i := 0; i < len(blocks); i++ {
+		blk := blocks[i]
 		switch blk.kind {
 		case kindHeading:
+			mark(blk.page, b.Len())
 			b.WriteString(strings.Repeat("#", clampLevel(blk.level)))
 			b.WriteString(" ")
 			b.WriteString(blk.text)
 			b.WriteString("\n\n")
 		case kindList:
-			b.WriteString(blk.text)
-			b.WriteString("\n")
-			if i+1 >= len(blocks) || blocks[i+1].kind != kindList || isOrderedItem(blocks[i+1].text) != isOrderedItem(blk.text) {
-				b.WriteString("\n")
+			j := i
+			var run []mdrender.Block
+			for ; j < len(blocks) && blocks[j].kind == kindList; j++ {
+				run = append(run, mdrender.Block{Kind: mdrender.List, Text: blocks[j].text})
 			}
+			// Document writes one line per item, with blank lines only between lists.
+			k := i
+			for _, l := range strings.SplitAfter(mdrender.Document(run), "\n") {
+				if strings.TrimSpace(l) != "" && k < j {
+					mark(blocks[k].page, b.Len())
+					k++
+				}
+				b.WriteString(l)
+			}
+			b.WriteString("\n")
+			i = j - 1
 		default:
+			mark(blk.page, b.Len())
 			b.WriteString(blk.text)
 			b.WriteString("\n\n")
 		}
@@ -403,5 +513,3 @@ func renderWithBreaks(blocks []block) (string, []PageBreak) {
 	}
 	return md, breaks
 }
-
-func isOrderedItem(text string) bool { return orderedItemRe.MatchString(text) }

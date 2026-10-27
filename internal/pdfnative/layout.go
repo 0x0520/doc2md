@@ -10,7 +10,9 @@ import (
 
 // line is one reconstructed text line with the geometry and font signals the later passes need.
 // y is the baseline (larger is higher on the page), xStart the left edge, pre marks
-// a finished Markdown table. word2X is the left edge of the second word (0 if there is
+// a finished Markdown table. rich and linked are the text with emphasis and links
+// and with links only (empty without markup, see richText); styled marks a line
+// emphasised as a whole. word2X is the left edge of the second word (0 if there is
 // none); for a list item it is where the text after the marker starts.
 type line struct {
 	text     string
@@ -21,6 +23,9 @@ type line struct {
 	bold     bool
 	page     int
 	pre      bool
+	rich     string
+	linked   string
+	styled   bool
 }
 
 // page carries one source page through the pipeline: raw token rows, then
@@ -31,6 +36,7 @@ type page struct {
 	height float64
 	num    int
 	places []imgPlace
+	links  []linkArea
 }
 
 // minGlyphSize drops invisible text at or below this size (points).
@@ -117,38 +123,15 @@ func joinLine(toks []pdf.Text) line {
 // font signals. It sorts toks by X in place.
 func joinText(toks []pdf.Text) (string, float64) {
 	sortByX(toks)
-
-	var span, sumW float64
-	for i := 1; i < len(toks); i++ {
-		sumW += toks[i-1].W
-	}
-	if len(toks) > 0 {
-		span = toks[len(toks)-1].X - toks[0].X
-	}
-	// Reported widths are trusted only when they cover a fair part of the row's extent;
-	// broken width tables would otherwise make every gap look like a space.
-	wReliable := span > 0 && sumW > 0.4*span
+	wReliable := widthsReliable(toks)
 
 	var b strings.Builder
 	var word2X float64
 	seenWord, inGap := false, false
 	for i, t := range toks {
-		if i > 0 {
-			prev := toks[i-1]
-			prevW := prev.W
-			if !wReliable {
-				prevW = estimateWidth(prev.S, prev.FontSize)
-			}
-			fs := maxF(t.FontSize, prev.FontSize)
-			if fs == 0 {
-				fs = 10
-			}
-			endsSpace := strings.HasSuffix(b.String(), " ")
-			startsSpace := strings.HasPrefix(t.S, " ")
-			if t.X-prev.X-prevW > 0.2*fs && !endsSpace && !startsSpace {
-				b.WriteString(" ")
-				inGap = seenWord
-			}
+		if i > 0 && needsSpace(toks[i-1], t, wReliable, b.String()) {
+			b.WriteString(" ")
+			inGap = seenWord
 		}
 		b.WriteString(t.S)
 		switch {
@@ -162,6 +145,34 @@ func joinText(toks []pdf.Text) (string, float64) {
 	}
 
 	return strings.Join(strings.Fields(b.String()), " "), word2X
+}
+
+// widthsReliable reports whether the reported widths cover a fair part of the row's
+// extent; broken width tables would otherwise make every gap look like a space.
+func widthsReliable(toks []pdf.Text) bool {
+	var span, sumW float64
+	for i := 1; i < len(toks); i++ {
+		sumW += toks[i-1].W
+	}
+	if len(toks) > 0 {
+		span = toks[len(toks)-1].X - toks[0].X
+	}
+	return span > 0 && sumW > 0.4*span
+}
+
+// needsSpace reports whether a word space belongs between prev and t: the gap
+// exceeds 0.2 font sizes and neither side is already a space. soFar is the text
+// written up to prev.
+func needsSpace(prev, t pdf.Text, wReliable bool, soFar string) bool {
+	prevW := prev.W
+	if !wReliable {
+		prevW = estimateWidth(prev.S, prev.FontSize)
+	}
+	fs := maxF(t.FontSize, prev.FontSize)
+	if fs == 0 {
+		fs = 10
+	}
+	return t.X-prev.X-prevW > 0.2*fs && !strings.HasSuffix(soFar, " ") && !strings.HasPrefix(t.S, " ")
 }
 
 // sortByX orders tokens left to right in place. Rows come out of pageRows sorted, so

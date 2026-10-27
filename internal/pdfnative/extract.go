@@ -14,7 +14,6 @@ import (
 	"github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 // PageBreak marks where the text of source page Page (1-based) starts in the Markdown;
@@ -81,21 +80,16 @@ func rewritePDF(data []byte) (out []byte, err error) {
 			err = fmt.Errorf("rewrite pdf: %v", r)
 		}
 	}()
-	disableConfigDir.Do(api.DisableConfigDir)
-	conf := model.NewDefaultConfiguration()
-	conf.ValidationMode = model.ValidationRelaxed
 	var dec bytes.Buffer
-	derr := api.Decrypt(context.Background(), bytes.NewReader(data), &dec, conf)
+	derr := api.Decrypt(context.Background(), bytes.NewReader(data), &dec, pdfcpuConfig())
 	if derr == nil {
 		return dec.Bytes(), nil
 	}
 	if errors.Is(derr, pdfcpu.ErrWrongPassword) {
 		return nil, ErrEncrypted
 	}
-	conf = model.NewDefaultConfiguration()
-	conf.ValidationMode = model.ValidationRelaxed
 	var buf bytes.Buffer
-	if err := api.Optimize(context.Background(), bytes.NewReader(data), &buf, conf, nil); err != nil {
+	if err := api.Optimize(context.Background(), bytes.NewReader(data), &buf, pdfcpuConfig(), nil); err != nil {
 		return nil, fmt.Errorf("rewrite pdf: %w", err)
 	}
 	return buf.Bytes(), nil
@@ -138,6 +132,7 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 			rows:   pageRows(toks),
 			height: height,
 			num:    i + 1,
+			links:  pageLinks(p),
 			places: places,
 		})
 	}
@@ -153,7 +148,7 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 	for pi := range pages {
 		// Columns are reordered before tables are assembled so the gutter is not read as a cell gap.
 		pages[pi].rows = splitColumnRows(pages[pi].rows)
-		pages[pi].lines = assembleRows(pages[pi].rows, verbatim)
+		pages[pi].lines = assembleRows(pages[pi].rows, verbatim, pages[pi].links)
 		for li := range pages[pi].lines {
 			pages[pi].lines[li].page = pages[pi].num
 		}

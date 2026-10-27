@@ -23,6 +23,8 @@ const (
 	// colSegGapFactor is tighter than a table cell gap (cellGapFactor): some layouts leave
 	// barely a font size between columns, while word gaps stay near 0.3.
 	colSegGapFactor = 1.0
+	// colEndGapLeads is the gap, in line pitches of the columns, that ends them.
+	colEndGapLeads = 2.5
 )
 
 // colSeg is a run of tokens without a cell-sized gap, keeping both x edges.
@@ -48,25 +50,91 @@ func splitColumnsDepth(rows [][]pdf.Text, depth int) [][]pdf.Text {
 		return rows
 	}
 
+	tab := tableRows(rows, g)
 	var out [][]pdf.Text
-	var band [][]pdf.Text
+	var band []int
 	flush := func() {
-		if len(band) > 0 {
-			out = append(out, reorderBand(band, g, depth)...)
-			band = nil
+		if len(band) == 0 {
+			return
 		}
+		end := columnsEnd(rows, segs, band, g)
+		head := make([][]pdf.Text, 0, end)
+		for _, i := range band[:end] {
+			head = append(head, rows[i])
+		}
+		out = append(out, reorderBand(head, g, depth)...)
+		for _, i := range band[end:] {
+			out = append(out, rows[i])
+		}
+		band = nil
 	}
 	for i, row := range rows {
-		// Rows crossing the gutter (titles, spanning captions) cut the page into bands that are reordered separately.
+		// Rows crossing the gutter (titles, spanning captions) cut the page into bands
+		// that are reordered separately. So does the start or end of a table under the
+		// columns: its rows fill both sides too, but would fail the prose checks for
+		// the whole band.
 		if segsCross(segs[i], g) {
 			flush()
 			out = append(out, row)
 			continue
 		}
-		band = append(band, row)
+		if len(band) > 0 && tab[i] != tab[band[len(band)-1]] {
+			flush()
+		}
+		band = append(band, i)
 	}
 	flush()
 	return out
+}
+
+// tableRows marks rows with a cell-sized gap that does not span the gutter, i.e.
+// table cells on one side. A lone such row is a wide word gap in prose and not marked.
+func tableRows(rows [][]pdf.Text, g float64) []bool {
+	raw := make([]bool, len(rows))
+	for i, row := range rows {
+		toks := byX(row)
+		gap := cellGapFactor * dominantSize(toks)
+		for k := 1; k < len(toks); k++ {
+			a, b := toks[k-1], toks[k]
+			if b.X-(a.X+a.W) > gap && (a.X+a.W/2 < g) == (b.X+b.W/2 < g) {
+				raw[i] = true
+				break
+			}
+		}
+	}
+	tab := make([]bool, len(rows))
+	for i := range raw {
+		tab[i] = raw[i] && ((i > 0 && raw[i-1]) || (i+1 < len(raw) && raw[i+1]))
+	}
+	return tab
+}
+
+// columnsEnd returns how many rows of the band belong to the columns. After the last
+// row with text on both sides only the left column can go on (it is filled first);
+// a row there in another size than the columns, or after a gap of more than
+// colEndGapLeads line pitches, is the single-column text below them, such as the
+// next heading, and is kept out of the reordering.
+func columnsEnd(rows [][]pdf.Text, segs [][]colSeg, band []int, g float64) int {
+	last := -1
+	var sizes, ys []float64
+	for k, i := range band {
+		if sidesOccupied(segs[i], g) {
+			last = k
+			sizes = append(sizes, dominantSize(rows[i]))
+			ys = append(ys, rowBaseline(rows[i]))
+		}
+	}
+	if last < 0 {
+		return len(band)
+	}
+	size, lead := medianF(sizes), medianLeading(ys)
+	for k := last + 1; k < len(band); k++ {
+		row, prev := rows[band[k]], rows[band[k-1]]
+		if !within(dominantSize(row), size, 0.12) || rowBaseline(prev)-rowBaseline(row) > colEndGapLeads*lead {
+			return k
+		}
+	}
+	return len(band)
 }
 
 // rowSegs splits a row into horizontal segments at gaps wider than colSegGapFactor font sizes.
