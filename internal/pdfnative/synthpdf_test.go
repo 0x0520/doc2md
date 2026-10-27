@@ -26,7 +26,7 @@ type synthPage struct {
 	runs []textRun
 }
 
-func buildPDF(t *testing.T, pages ...synthPage) []byte {
+func buildPDF(t testing.TB, pages ...synthPage) []byte {
 	t.Helper()
 
 	jsonPages := make(map[string]any, len(pages))

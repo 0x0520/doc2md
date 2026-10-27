@@ -204,3 +204,72 @@ func TestGolden_TOCPageDropped(t *testing.T) {
 	}}
 	assertGolden(t, "toc_page_dropped", renderSynth(t, toc, content))
 }
+
+func TestGolden_NumberedListHangingIndent(t *testing.T) {
+	item := func(marker, text string, yTop float64) []textRun {
+		return []textRun{
+			{text: marker, x: 72, yTop: yTop, size: 10},
+			{text: text, x: 90, yTop: yTop, size: 10},
+		}
+	}
+	runs := []textRun{{text: "Requirements", x: 72, yTop: 110, size: 15, bold: true}}
+	runs = append(runs, item("•", "Every upload is checked for size and type.", 140)...)
+	runs = append(runs, item("•", "Rejected files are reported to the sender.", 140+bodyLead)...)
+	runs = append(runs, item("1.", "Receive the file and check that it is", 140+2.5*bodyLead)...)
+	runs = append(runs, textRun{text: "complete before anything else.", x: 90, yTop: 140 + 3.5*bodyLead, size: 10})
+	runs = append(runs, item("2.", "Validate the content.", 140+4.5*bodyLead)...)
+	runs = append(runs, item("3.", "Store the result.", 140+5.5*bodyLead)...)
+	runs = append(runs, textRun{text: "The following table lists the status values.", x: 72, yTop: 140 + 6.5*bodyLead, size: 10})
+	assertGolden(t, "numbered_list_hanging_indent", renderSynth(t, synthPage{runs: runs}))
+}
+
+// TestGolden_ParagraphSpacing sets paragraphs apart by less than a line, as word
+// processors do with space after a paragraph.
+func TestGolden_ParagraphSpacing(t *testing.T) {
+	runs := []textRun{{text: "Two-column section", x: 72, yTop: 110, size: 15, bold: true}}
+	y := 140.0
+	for p := 1; p <= 3; p++ {
+		for k, s := range []string{
+			"Paragraph " + string(rune('0'+p)) + " of the section.",
+			"It is long enough to wrap over several",
+			"lines in a narrow column of the page.",
+		} {
+			if k > 0 {
+				y += bodyLead
+			}
+			runs = append(runs, textRun{text: s, x: 72, yTop: y, size: 10})
+		}
+		y += bodyLead + 6
+	}
+	assertGolden(t, "paragraph_spacing", renderSynth(t, synthPage{runs: runs}))
+}
+
+// TestGolden_SlideTitles is a slide deck exported to PDF: every content slide opens
+// with its title in one size, but a slide holding only a table or a picture gives the
+// title nothing to stand out against.
+func TestGolden_SlideTitles(t *testing.T) {
+	title := func(s string) textRun { return textRun{text: s, x: 50, yTop: 80, size: 26} }
+	md := renderSynth(t,
+		synthPage{runs: []textRun{
+			{text: "Release Review", x: 150, yTop: 300, size: 32},
+			{text: "Status of the import service", x: 170, yTop: 340, size: 16},
+		}},
+		synthPage{runs: []textRun{
+			title("Highlights"),
+			{text: "• Faster uploads", x: 60, yTop: 140, size: 16},
+			{text: "• Fewer errors", x: 60, yTop: 170, size: 16},
+			{text: "• New validation rules", x: 60, yTop: 200, size: 16},
+		}},
+		synthPage{runs: []textRun{
+			title("Numbers"),
+			{text: "Metric", x: 60, yTop: 140, size: 14}, {text: "Before", x: 200, yTop: 140, size: 14}, {text: "After", x: 320, yTop: 140, size: 14},
+			{text: "Errors", x: 60, yTop: 170, size: 14}, {text: "12", x: 200, yTop: 170, size: 14}, {text: "3", x: 320, yTop: 170, size: 14},
+			{text: "Time", x: 60, yTop: 200, size: 14}, {text: "40 s", x: 200, yTop: 200, size: 14}, {text: "9 s", x: 320, yTop: 200, size: 14},
+		}},
+		synthPage{runs: []textRun{
+			title("Diagram"),
+			{text: "A free text box next to the picture.", x: 300, yTop: 150, size: 12},
+		}},
+	)
+	assertGolden(t, "slide_titles", md)
+}

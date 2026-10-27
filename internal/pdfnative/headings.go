@@ -321,3 +321,42 @@ func clampLevel(l int) int {
 	}
 	return l
 }
+
+// minTitlePages is how many pages must open with lines of one prominent size before
+// that size is taken for page titles.
+const minTitlePages = 3
+
+// pageTitles finds slide-style titles: the first line of a page, set in a prominent
+// size that opens at least minTitlePages pages with mostly different texts (a repeated
+// text is a running head). Such a title often has nothing beside it to stand out
+// against, e.g. on a slide holding only a table or a picture, and the neighbour on the
+// previous page is no measure.
+func pageTitles(lines []line, st docStats) map[int]bool {
+	bySize := map[float64][]int{}
+	seenPage := map[int]bool{}
+	for i, ln := range lines {
+		text := strings.TrimSpace(ln.text)
+		if seenPage[ln.page] || isImageMarker(text) {
+			continue
+		}
+		seenPage[ln.page] = true
+		if !ln.pre && ln.fontSize > st.bodySize+0.05*st.bodySize && len(text) <= maxChapterOpeningLen {
+			s := roundHalf(ln.fontSize)
+			bySize[s] = append(bySize[s], i)
+		}
+	}
+	titles := map[int]bool{}
+	for _, idx := range bySize {
+		texts := map[string]bool{}
+		for _, i := range idx {
+			texts[strings.TrimSpace(lines[i].text)] = true
+		}
+		if len(idx) < minTitlePages || 4*len(texts) < 3*len(idx) {
+			continue
+		}
+		for _, i := range idx {
+			titles[i] = true
+		}
+	}
+	return titles
+}

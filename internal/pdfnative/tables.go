@@ -103,8 +103,7 @@ func splitCells(row []pdf.Text) []cell {
 	if len(row) == 0 {
 		return nil
 	}
-	toks := append([]pdf.Text(nil), row...)
-	sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
+	toks := byX(row)
 	gap := cellGapFactor * dominantSize(toks)
 
 	var cells []cell
@@ -124,7 +123,8 @@ func splitCells(row []pdf.Text) []cell {
 }
 
 func mkCell(seg []pdf.Text) cell {
-	return cell{startX: seg[0].X, text: strings.TrimSpace(joinLine(seg).text), toks: seg}
+	text, _ := joinText(seg)
+	return cell{startX: seg[0].X, text: strings.TrimSpace(text), toks: seg}
 }
 
 // splitCellAtAnchors splits a cell at word gaps near known column positions, for

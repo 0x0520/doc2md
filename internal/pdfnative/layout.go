@@ -10,11 +10,13 @@ import (
 
 // line is one reconstructed text line with the geometry and font signals the later passes need.
 // y is the baseline (larger is higher on the page), xStart the left edge, pre marks
-// a finished Markdown table.
+// a finished Markdown table. word2X is the left edge of the second word (0 if there is
+// none); for a list item it is where the text after the marker starts.
 type line struct {
 	text     string
 	y        float64
 	xStart   float64
+	word2X   float64
 	fontSize float64
 	bold     bool
 	page     int
@@ -66,29 +68,28 @@ func pageRows(tokens []pdf.Text) [][]pdf.Text {
 		toks = append(toks, t)
 	}
 
-	sort.SliceStable(toks, func(i, j int) bool {
-		if sameLine(toks[i], toks[j]) {
-			return toks[i].X < toks[j].X
-		}
-		return toks[i].Y > toks[j].Y
-	})
+	// sameLine is not transitive, so it cannot order a sort: sort by baseline, cut a row
+	// where a token leaves the tolerance of the row's top token, then order each row by x.
+	sort.SliceStable(toks, func(i, j int) bool { return toks[i].Y > toks[j].Y })
 
 	var rows [][]pdf.Text
-	var cur []pdf.Text
-	for _, t := range toks {
-		if len(cur) > 0 && !sameLine(t, cur[0]) {
-			rows = append(rows, cur)
-			cur = nil
+	start := 0
+	for i := 1; i <= len(toks); i++ {
+		if i < len(toks) && sameLine(toks[i], toks[start]) {
+			continue
 		}
-		cur = append(cur, t)
-	}
-	if len(cur) > 0 {
-		rows = append(rows, cur)
+		row := toks[start:i:i]
+		sort.SliceStable(row, func(a, b int) bool { return row[a].X < row[b].X })
+		rows = append(rows, row)
+		start = i
 	}
 	return rows
 }
 
-func rowText(row []pdf.Text) string { return joinLine(row).text }
+func rowText(row []pdf.Text) string {
+	text, _ := joinText(row)
+	return text
+}
 
 // rowBaseline is the baseline of the row's first token.
 func rowBaseline(row []pdf.Text) float64 {
@@ -101,7 +102,21 @@ func rowBaseline(row []pdf.Text) float64 {
 // joinLine joins a row's tokens into one line, inserting a space where the gap exceeds
 // 0.2 font sizes. It sorts toks by X in place.
 func joinLine(toks []pdf.Text) line {
-	sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
+	text, word2X := joinText(toks)
+	return line{
+		text:     text,
+		y:        toks[0].Y,
+		xStart:   toks[0].X,
+		word2X:   word2X,
+		fontSize: dominantSize(toks),
+		bold:     dominantBold(toks),
+	}
+}
+
+// joinText is the text and second-word edge of joinLine, for callers that need no
+// font signals. It sorts toks by X in place.
+func joinText(toks []pdf.Text) (string, float64) {
+	sortByX(toks)
 
 	var span, sumW float64
 	for i := 1; i < len(toks); i++ {
@@ -115,6 +130,8 @@ func joinLine(toks []pdf.Text) line {
 	wReliable := span > 0 && sumW > 0.4*span
 
 	var b strings.Builder
+	var word2X float64
+	seenWord, inGap := false, false
 	for i, t := range toks {
 		if i > 0 {
 			prev := toks[i-1]
@@ -130,19 +147,49 @@ func joinLine(toks []pdf.Text) line {
 			startsSpace := strings.HasPrefix(t.S, " ")
 			if t.X-prev.X-prevW > 0.2*fs && !endsSpace && !startsSpace {
 				b.WriteString(" ")
+				inGap = seenWord
 			}
 		}
 		b.WriteString(t.S)
+		switch {
+		case strings.TrimSpace(t.S) == "":
+			inGap = seenWord
+		case !seenWord:
+			seenWord = true
+		case inGap && word2X == 0:
+			word2X = t.X
+		}
 	}
 
-	text := strings.Join(strings.Fields(b.String()), " ")
-	return line{
-		text:     text,
-		y:        toks[0].Y,
-		xStart:   toks[0].X,
-		fontSize: dominantSize(toks),
-		bold:     dominantBold(toks),
+	return strings.Join(strings.Fields(b.String()), " "), word2X
+}
+
+// sortByX orders tokens left to right in place. Rows come out of pageRows sorted, so
+// the check usually saves the sort.
+func sortByX(toks []pdf.Text) {
+	if !sortedByX(toks) {
+		sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
 	}
+}
+
+// byX returns row ordered left to right without changing it: row itself when it is
+// already in order, else a sorted copy.
+func byX(row []pdf.Text) []pdf.Text {
+	if sortedByX(row) {
+		return row
+	}
+	toks := append([]pdf.Text(nil), row...)
+	sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
+	return toks
+}
+
+func sortedByX(toks []pdf.Text) bool {
+	for i := 1; i < len(toks); i++ {
+		if toks[i].X < toks[i-1].X {
+			return false
+		}
+	}
+	return true
 }
 
 // dominantSize returns the font size (to 0.5 pt) carrying the most characters.
@@ -160,13 +207,18 @@ func dominantSize(toks []pdf.Text) float64 {
 // dominantBold reports whether at least half of the characters are in a bold face.
 func dominantBold(toks []pdf.Text) bool {
 	var bold, total int
+	// Tokens come one per character, mostly in runs of one font.
+	lastFont, lastBold := "", false
 	for _, t := range toks {
 		if strings.TrimSpace(t.S) == "" {
 			continue
 		}
+		if t.Font != lastFont {
+			lastFont, lastBold = t.Font, isBoldFont(t.Font)
+		}
 		n := len(t.S)
 		total += n
-		if isBoldFont(t.Font) {
+		if lastBold {
 			bold += n
 		}
 	}

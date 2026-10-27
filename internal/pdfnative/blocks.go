@@ -48,6 +48,8 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 	}
 	st := computeStats(lines, body)
 	chapterSeq := chapterSequence(lines, st)
+	titles := pageTitles(lines, st)
+	pitches := linePitches(lines)
 
 	isHead := make([]bool, len(lines))
 	headText := make([]string, len(lines))
@@ -60,6 +62,9 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 			continue
 		}
 		lvl, txt, ok, numbered, absorb := classifyHeading(lines, i, st, chapterSeq)
+		if !ok && titles[i] {
+			lvl, txt, ok = 0, strings.TrimSpace(lines[i].text), true
+		}
 		if !ok {
 			continue
 		}
@@ -92,6 +97,8 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 	var paraPrev *line
 	var lastListLine *line
 	lastListIdx := -1
+	// listTextX is where the current item's text starts after its marker, 0 if unknown.
+	listTextX := 0.0
 	paraPage := 0
 	flush := func() {
 		if len(para) > 0 {
@@ -150,14 +157,18 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 			blocks = append(blocks, block{kind: kindList, text: normalizeListMarker(text), page: ln.page})
 			cp := ln
 			lastListLine, lastListIdx = &cp, len(blocks)-1
+			listTextX = 0
+			if ln.word2X > ln.xStart {
+				listTextX = ln.word2X
+			}
 		default:
-			if len(para) == 0 && lastListLine != nil && continuesListItem(*lastListLine, ln, body) {
+			if len(para) == 0 && lastListLine != nil && continuesListItem(*lastListLine, ln, body, listTextX, pitches) {
 				blocks[lastListIdx].text = joinWrapped(blocks[lastListIdx].text, text)
 				cp := ln
 				lastListLine = &cp
 				continue
 			}
-			if paraPrev != nil && !sameParagraph(*paraPrev, ln, body) {
+			if paraPrev != nil && !sameParagraph(*paraPrev, ln, body, pitches) {
 				flush()
 			}
 			if len(para) == 0 {
@@ -205,14 +216,15 @@ func joinTableMarkdown(a, b string) (string, bool) {
 }
 
 // sameParagraph reports whether cur continues the paragraph of prev, judged by line
-// pitch (in font sizes), font size and left indent. A hanging "(1)" number allows a deeper indent.
-func sameParagraph(prev, cur line, body float64) bool {
+// pitch (in font sizes and against the usual pitch of the size), font size and left
+// indent. A hanging "(1)" number allows a deeper indent.
+func sameParagraph(prev, cur line, body float64, pitches map[float64]float64) bool {
 	fs := maxF(cur.fontSize, body)
 	if fs == 0 {
 		fs = 10
 	}
 	norm := (prev.y - cur.y) / fs
-	if norm < 0.35 || norm > 2.55 {
+	if norm < 0.35 || norm > 2.55 || paragraphSpaced(prev, cur, pitches) {
 		return false
 	}
 	if !within(prev.fontSize, cur.fontSize, 0.12) {
@@ -226,20 +238,70 @@ func sameParagraph(prev, cur line, body float64) bool {
 
 var hangingNumRe = regexp.MustCompile(`^\(\d{1,3}[a-z]?\)\s`)
 
-// continuesListItem reports whether cur is the wrapped continuation of a list item; the indent may not be left of the item text.
-func continuesListItem(prev, cur line, body float64) bool {
+// continuesListItem reports whether cur is the wrapped continuation of a list item.
+// The indent may not be left of the item text: textX where the text after the marker
+// starts (hanging indent), else the previous line's left edge.
+func continuesListItem(prev, cur line, body, textX float64, pitches map[float64]float64) bool {
 	fs := maxF(cur.fontSize, body)
 	if fs == 0 {
 		fs = 10
 	}
 	norm := (prev.y - cur.y) / fs
-	if norm < 0.35 || norm > 2.55 {
+	if norm < 0.35 || norm > 2.55 || paragraphSpaced(prev, cur, pitches) {
 		return false
 	}
 	if !within(prev.fontSize, cur.fontSize, 0.12) {
 		return false
 	}
-	return cur.xStart >= prev.xStart-0.5*fs && cur.xStart-prev.xStart <= 4*fs
+	left := prev.xStart
+	if textX > 0 {
+		left = textX
+	}
+	return cur.xStart >= left-0.5*fs && cur.xStart-prev.xStart <= 4*fs
+}
+
+// paraGapFactor is the baseline gap, in multiples of the usual line pitch, from which
+// lines are set apart by paragraph spacing. Word's default 8 pt after 12 pt text is
+// about 1.45; taller lines from inline formulas or superscripts stay below 1.2.
+const paraGapFactor = 1.3
+
+// paragraphSpaced reports whether cur sits a paragraph gap below prev, measured
+// against the usual pitch of the size. Paragraph spacing is usually well under one
+// line, so a fixed limit in font sizes cannot see it.
+func paragraphSpaced(prev, cur line, pitches map[float64]float64) bool {
+	size := roundHalf(cur.fontSize)
+	if roundHalf(prev.fontSize) != size || prev.page != cur.page {
+		return false
+	}
+	p := pitches[size]
+	return p > 0 && prev.y-cur.y > paraGapFactor*p
+}
+
+// linePitches returns the usual baseline distance per font size (to 0.5 pt): the most
+// frequent gap between consecutive lines of that size on a page, ties going to the
+// smaller gap, so paragraphs of two lines still yield the line pitch.
+func linePitches(lines []line) map[float64]float64 {
+	counts := map[float64]map[float64]int{}
+	for i := 1; i < len(lines); i++ {
+		prev, cur := lines[i-1], lines[i]
+		size := roundHalf(cur.fontSize)
+		if prev.pre || cur.pre || prev.page != cur.page || size == 0 || roundHalf(prev.fontSize) != size {
+			continue
+		}
+		gap := prev.y - cur.y
+		if gap < 0.35*size || gap > 2.55*size {
+			continue
+		}
+		if counts[size] == nil {
+			counts[size] = map[float64]int{}
+		}
+		counts[size][roundHalf(gap)]++
+	}
+	out := make(map[float64]float64, len(counts))
+	for size, c := range counts {
+		out[size] = modeByWeight(c)
+	}
+	return out
 }
 
 // joinWrappedLines joins wrapped lines into one paragraph, repairing hyphenation.
@@ -278,9 +340,16 @@ func joinWrapped(acc, next string) string {
 	return acc + " " + next
 }
 
-// normalizeListMarker rewrites any leading bullet glyph to a Markdown "- " marker.
+// orderedItemRe matches a number marker that Markdown accepts for an ordered list (at most nine digits).
+var orderedItemRe = regexp.MustCompile(`^(\d{1,9}[.)])\s+`)
+
+// normalizeListMarker keeps a number marker ("1.", "2)") as an ordered list item and
+// rewrites any leading bullet glyph to a Markdown "- " marker.
 func normalizeListMarker(text string) string {
 	trimmed := strings.TrimLeft(text, " \t")
+	if m := orderedItemRe.FindStringSubmatch(trimmed); m != nil {
+		return m[1] + " " + trimmed[len(m[0]):]
+	}
 	for {
 		stripped := false
 		for _, m := range []string{"•", "*", "-", "+"} {
@@ -296,14 +365,10 @@ func normalizeListMarker(text string) string {
 	}
 }
 
-// render is renderWithBreaks without the page breaks.
-func render(blocks []block) string {
-	md, _ := renderWithBreaks(blocks)
-	return md
-}
-
 // renderWithBreaks serialises blocks to Markdown and records the byte offset where
-// each source page begins. Consecutive list items are separated by a single newline.
+// each source page begins. Consecutive list items are separated by a single newline,
+// unless they switch between bullets and numbers: a "2." right under a bullet item
+// would be read as a lazy continuation of that item, not as a new list.
 func renderWithBreaks(blocks []block) (string, []PageBreak) {
 	var b strings.Builder
 	var breaks []PageBreak
@@ -322,7 +387,7 @@ func renderWithBreaks(blocks []block) (string, []PageBreak) {
 		case kindList:
 			b.WriteString(blk.text)
 			b.WriteString("\n")
-			if i+1 >= len(blocks) || blocks[i+1].kind != kindList {
+			if i+1 >= len(blocks) || blocks[i+1].kind != kindList || isOrderedItem(blocks[i+1].text) != isOrderedItem(blk.text) {
 				b.WriteString("\n")
 			}
 		default:
@@ -338,3 +403,5 @@ func renderWithBreaks(blocks []block) (string, []PageBreak) {
 	}
 	return md, breaks
 }
+
+func isOrderedItem(text string) bool { return orderedItemRe.MatchString(text) }

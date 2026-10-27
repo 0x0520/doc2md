@@ -6,11 +6,13 @@ package pdfnative
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
@@ -45,6 +47,9 @@ func RenderVerbatim(data []byte) (string, []Image, []PageBreak, error) {
 	return renderPDF(data, true)
 }
 
+// ErrEncrypted is returned for a PDF that cannot be opened without a user password.
+var ErrEncrypted = errors.New("pdf is encrypted with a password")
+
 // renderPDF retries once on a copy rewritten by pdfcpu when the file cannot be read as is.
 func renderPDF(data []byte, verbatim bool) (string, []Image, []PageBreak, error) {
 	md, images, breaks, err := renderPDFOnce(data, verbatim)
@@ -53,6 +58,10 @@ func renderPDF(data []byte, verbatim bool) (string, []Image, []PageBreak, error)
 	}
 	repaired, rerr := rewritePDF(data)
 	if rerr != nil {
+		// The reader's own error for an encrypted file dumps the binary /Encrypt dictionary.
+		if errors.Is(rerr, ErrEncrypted) {
+			return "", nil, nil, rerr
+		}
 		return "", nil, nil, err
 	}
 	md, images, breaks, err2 := renderPDFOnce(repaired, verbatim)
@@ -63,7 +72,8 @@ func renderPDF(data []byte, verbatim bool) (string, []Image, []PageBreak, error)
 }
 
 // rewritePDF repairs or decrypts a file with pdfcpu (relaxed validation): Decrypt first,
-// then Optimize, which rebuilds the cross-reference data.
+// then Optimize, which rebuilds the cross-reference data. A file that needs a user
+// password yields ErrEncrypted.
 func rewritePDF(data []byte) (out []byte, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -74,8 +84,12 @@ func rewritePDF(data []byte) (out []byte, err error) {
 	conf := model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
 	var dec bytes.Buffer
-	if err := api.Decrypt(bytes.NewReader(data), &dec, conf); err == nil {
+	derr := api.Decrypt(bytes.NewReader(data), &dec, conf)
+	if derr == nil {
 		return dec.Bytes(), nil
+	}
+	if errors.Is(derr, pdfcpu.ErrWrongPassword) {
+		return nil, ErrEncrypted
 	}
 	conf = model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
@@ -114,11 +128,7 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 	}
 
 	var pages []page
-	for i := 1; i <= r.NumPage(); i++ {
-		p := r.Page(i)
-		if p.V.IsNull() {
-			continue
-		}
+	for i, p := range documentPages(r) {
 		toks, places, height, ok := pageTokens(p)
 		if !ok {
 			continue
@@ -126,7 +136,7 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 		pages = append(pages, page{
 			rows:   pageRows(toks),
 			height: height,
-			num:    i,
+			num:    i + 1,
 			places: places,
 		})
 	}
@@ -157,6 +167,39 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 		return "", nil, nil, fmt.Errorf("no text could be extracted")
 	}
 	return md, images, breaks, nil
+}
+
+// documentPages lists the pages in order with one walk of the page tree;
+// Reader.Page walks it from the root for every page, which is quadratic in the page
+// count. Like Reader.NumPage it trusts the root's /Count.
+func documentPages(r *pdf.Reader) []pdf.Page {
+	n := r.NumPage()
+	var out []pdf.Page
+	// seen guards against a cyclic tree. A node's printed form lists its own entries,
+	// with /Parent and /Kids as object references, so it is unique per node.
+	seen := map[string]bool{}
+	var walk func(node pdf.Value)
+	walk = func(node pdf.Value) {
+		key := node.String()
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		kids := node.Key("Kids")
+		for i := 0; i < kids.Len() && len(out) < n; i++ {
+			kid := kids.Index(i)
+			switch kid.Key("Type").Name() {
+			case "Pages":
+				walk(kid)
+			case "Page":
+				out = append(out, pdf.Page{V: kid})
+			}
+		}
+	}
+	if root := r.Trailer().Key("Root").Key("Pages"); root.Key("Type").Name() == "Pages" {
+		walk(root)
+	}
+	return out
 }
 
 // pageHeight returns the MediaBox height, or 0 if the page has none.

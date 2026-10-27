@@ -74,8 +74,7 @@ func rowSegs(row []pdf.Text) []colSeg {
 	if len(row) == 0 {
 		return nil
 	}
-	toks := append([]pdf.Text(nil), row...)
-	sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
+	toks := byX(row)
 	gap := colSegGapFactor * dominantSize(toks)
 
 	var segs []colSeg
@@ -238,8 +237,7 @@ func multiSegFrac(rows [][]pdf.Text, fs float64) float64 {
 	gap := cellGapFactor * fs
 	multi := 0
 	for _, row := range rows {
-		toks := append([]pdf.Text(nil), row...)
-		sort.SliceStable(toks, func(i, j int) bool { return toks[i].X < toks[j].X })
+		toks := byX(row)
 		for i := 1; i < len(toks); i++ {
 			if toks[i].X-(toks[i-1].X+toks[i-1].W) > gap {
 				multi++

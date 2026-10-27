@@ -2,6 +2,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/png"
 	"strings"
@@ -188,7 +189,7 @@ func TestGroupBlocks_RepairsMovedFromDownstream(t *testing.T) {
 	at := func(text string, y float64, size float64) line {
 		return line{text: text, fontSize: size, y: y}
 	}
-	run := func(lines ...line) string { return render(groupBlocks([]page{{lines: lines}}, body, false)) }
+	run := func(lines ...line) string { return blocksMarkdown(groupBlocks([]page{{lines: lines}}, body, false)) }
 
 	t.Run("a bullet in front of a numbered heading is decoration, not list content", func(t *testing.T) {
 		got := run(
@@ -313,8 +314,10 @@ func TestNormalizeListMarker(t *testing.T) {
 		{"• First item", "- First item"},
 		{"- already Markdown", "- already Markdown"},
 		{"* Asterisk", "- Asterisk"},
-		{"1. Numbered", "- 1. Numbered"},
-		{"2) Also numbered", "- 2) Also numbered"},
+		{"1. Numbered", "1. Numbered"},
+		{"2) Also numbered", "2) Also numbered"},
+		{"  12.  Indented number", "12. Indented number"},
+		{"• 3. Bullet before a number", "- 3. Bullet before a number"},
 	}
 	for _, tc := range tests {
 		if got := normalizeListMarker(tc.in); got != tc.want {
@@ -361,9 +364,9 @@ func TestGroupBlocks_ListContinuation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := render(groupBlocks([]page{{lines: tc.lines}}, 11, false))
+			got := blocksMarkdown(groupBlocks([]page{{lines: tc.lines}}, 11, false))
 			if got != tc.want {
-				t.Errorf("render(groupBlocks) mismatch:\n got: %q\nwant: %q", got, tc.want)
+				t.Errorf("blocksMarkdown(groupBlocks) mismatch:\n got: %q\nwant: %q", got, tc.want)
 			}
 		})
 	}
@@ -615,4 +618,49 @@ func toLower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// blocksMarkdown is renderWithBreaks without the page breaks.
+func blocksMarkdown(blocks []block) string {
+	md, _ := renderWithBreaks(blocks)
+	return md
+}
+
+// TestGroupBlocks_ParagraphSpacing covers word-processor paragraph spacing: a gap of
+// well under one line on top of the usual pitch, here 17 pt lines with 25 pt between
+// paragraphs, as in a Word document at 12 pt with 8 pt after each paragraph.
+func TestGroupBlocks_ParagraphSpacing(t *testing.T) {
+	var lines []line
+	y := 700.0
+	for p := 1; p <= 3; p++ {
+		for k, s := range []string{fmt.Sprintf("Paragraph %d of the narrow column.", p), "It wraps over several lines in", "a narrow column of the page."} {
+			if k == 0 && p > 1 {
+				y -= 25
+			} else if k > 0 {
+				y -= 17
+			}
+			lines = append(lines, line{text: s, y: y, xStart: 72, fontSize: 12})
+		}
+	}
+	got := blocksMarkdown(groupBlocks([]page{{lines: lines}}, 12, false))
+	want := "Paragraph 1 of the narrow column. It wraps over several lines in a narrow column of the page.\n\n" +
+		"Paragraph 2 of the narrow column. It wraps over several lines in a narrow column of the page.\n\n" +
+		"Paragraph 3 of the narrow column. It wraps over several lines in a narrow column of the page.\n"
+	if got != want {
+		t.Errorf("paragraphs not split at the spacing:\n got: %q\nwant: %q", got, want)
+	}
+
+	t.Run("a slightly taller line stays in its paragraph", func(t *testing.T) {
+		lines := []line{
+			{text: "The formula a² + b² = c² raises", y: 700, xStart: 72, fontSize: 12},
+			{text: "this line a little above the", y: 680, xStart: 72, fontSize: 12},
+			{text: "usual pitch of the text.", y: 663, xStart: 72, fontSize: 12},
+			{text: "The next lines are set at the", y: 646, xStart: 72, fontSize: 12},
+			{text: "usual pitch again.", y: 629, xStart: 72, fontSize: 12},
+		}
+		got := blocksMarkdown(groupBlocks([]page{{lines: lines}}, 12, false))
+		if strings.Count(got, "\n\n") != 0 {
+			t.Errorf("a 20 pt gap against a 17 pt pitch is no paragraph break:\n%s", got)
+		}
+	})
 }

@@ -6,32 +6,101 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
+// maxFormDepth bounds the nesting of form XObjects; deeper chains are skipped.
+const maxFormDepth = 12
+
 // extractTokens interprets a page's content stream and returns one token per
 // character code, positioned in page space, plus the image draws. It tracks the
 // text state itself so that font widths, ToUnicode maps and embedded-font
-// ligatures can be applied.
+// ligatures can be applied. Form XObjects are interpreted in place.
 func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 	contents := p.V.Key("Contents")
 	if contents.Kind() == pdf.Null {
 		return nil, nil
 	}
+	in := &interpreter{fonts: map[string]map[string]*fontInfo{}, active: map[string]bool{}}
+	in.run(contents, p.Resources(), "", gstate{ctm: identM, tm: identM, tlm: identM, th: 1}, 0)
+	return in.out, in.places
+}
 
-	g := gstate{ctm: identM, tm: identM, tlm: identM, th: 1}
-	metricsCache := map[string]*fontMetrics{}
-	decoderCache := map[string]map[int]string{}
-	var enc pdf.TextEncoding
+// fontInfo is what a Tf operator needs from a font resource, built once per resource dictionary.
+type fontInfo struct {
+	baseFont string
+	enc      pdf.TextEncoding
+	metrics  *fontMetrics
+	decode   map[int]string
+}
+
+// interpreter collects the tokens and image draws of one page across its form XObjects.
+// fonts caches fontInfo per resource scope ("" is the page) and font name; active
+// holds the forms being interpreted, so a form that draws itself is not entered again.
+type interpreter struct {
+	out    []pdf.Text
+	places []imgPlace
+	fonts  map[string]map[string]*fontInfo
+	active map[string]bool
+}
+
+func (in *interpreter) font(res pdf.Value, scope, name string) *fontInfo {
+	cache := in.fonts[scope]
+	if cache == nil {
+		cache = map[string]*fontInfo{}
+		in.fonts[scope] = cache
+	}
+	if fi, ok := cache[name]; ok {
+		return fi
+	}
+	font := pdf.Font{V: res.Key("Font").Key(name)}
+	fi := &fontInfo{
+		baseFont: stripSubsetPrefix(font.BaseFont()),
+		enc:      font.Encoder(),
+		metrics:  buildMetrics(font),
+		decode:   buildDecoder(font),
+	}
+	cache[name] = fi
+	return fi
+}
+
+// form interprets a form XObject (PDF 32000-1 §8.10) with its /Matrix applied to the
+// current CTM. The state is restored afterwards, as if the call were wrapped in q/Q.
+func (in *interpreter) form(xo, parentRes pdf.Value, parentScope string, g gstate, depth int) {
+	// A stream's printed form ends in its file offset, so it identifies the object.
+	key := xo.String()
+	if depth >= maxFormDepth || in.active[key] {
+		return
+	}
+	in.active[key] = true
+	defer delete(in.active, key)
+	// A broken form loses only its own text, not the rest of the page.
+	defer func() { _ = recover() }()
+
+	res, scope := xo.Key("Resources"), key
+	// Forms without their own resources use the caller's (allowed for PDF 1.1 files).
+	if res.IsNull() {
+		res, scope = parentRes, parentScope
+	}
+	if m := xo.Key("Matrix"); m.Kind() == pdf.Array && m.Len() == 6 {
+		args := make([]pdf.Value, 6)
+		for i := range args {
+			args[i] = m.Index(i)
+		}
+		g.ctm = matrixFromArgs(args).mul(g.ctm)
+	}
+	in.run(xo, res, scope, g, depth+1)
+}
+
+func (in *interpreter) run(contents, res pdf.Value, scope string, g gstate, depth int) {
 	var stack []gstate
-	var out []pdf.Text
-	var places []imgPlace
 
 	// showText emits a token per character code and advances the text matrix.
 	showText := func(raw string) {
-		if g.metrics == nil {
+		if g.font == nil {
 			return
 		}
+		fi := g.font
 		step := 1
 		// Type0 fonts are read as two-byte codes.
-		if g.metrics.type0 {
+		if fi.metrics.type0 {
 			step = 2
 		}
 		for k := 0; k+step <= len(raw); k += step {
@@ -41,18 +110,18 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 			}
 			seg := raw[k : k+step]
 			txt := seg
-			if s, ok := g.decode[code]; ok && s != "" {
+			if s, ok := fi.decode[code]; ok && s != "" {
 				txt = s
-			} else if enc != nil {
-				txt = enc.Decode(seg)
+			} else if fi.enc != nil {
+				txt = fi.enc.Decode(seg)
 			}
 			txt = expandLigatures(txt)
-			w0 := g.metrics.width(code, txt)
+			w0 := fi.metrics.width(code, txt)
 
 			// Text rendering matrix (PDF 32000-1 §9.4.4): gives device-space position and size.
 			trm := textScale(g.tfs, g.th, g.trise).mul(g.tm).mul(g.ctm)
-			out = append(out, pdf.Text{
-				Font:     g.baseFont,
+			in.out = append(in.out, pdf.Text{
+				Font:     fi.baseFont,
 				FontSize: trm[0][0],
 				X:        trm[2][0],
 				Y:        trm[2][1],
@@ -132,24 +201,8 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 			}
 		case "Tf":
 			if len(args) == 2 {
-				name := args[0].Name()
-				font := p.Font(name)
-				g.tf = font
+				g.font = in.font(res, scope, args[0].Name())
 				g.tfs = args[1].Float64()
-				g.baseFont = stripSubsetPrefix(font.BaseFont())
-				enc = font.Encoder()
-				m, ok := metricsCache[name]
-				if !ok {
-					m = buildMetrics(font)
-					metricsCache[name] = m
-				}
-				g.metrics = m
-				dec, ok := decoderCache[name]
-				if !ok {
-					dec = buildDecoder(font)
-					decoderCache[name] = dec
-				}
-				g.decode = dec
 			}
 		case "\"":
 			if len(args) == 3 {
@@ -183,18 +236,22 @@ func extractTokens(p pdf.Page) ([]pdf.Text, []imgPlace) {
 					g.tm = translateM(tx, 0).mul(g.tm)
 				}
 			}
-		// Only the position of the image is kept; form XObjects are not entered.
 		case "Do":
-			if len(args) == 1 {
-				places = append(places, imgPlace{
-					name:   args[0].Name(),
-					topY:   g.ctm[2][1] + absF(g.ctm[1][1]),
-					height: absF(g.ctm[1][1]),
-				})
+			if len(args) != 1 {
+				break
 			}
+			xo := res.Key("XObject").Key(args[0].Name())
+			if xo.Key("Subtype").Name() == "Form" {
+				in.form(xo, res, scope, g, depth)
+				break
+			}
+			in.places = append(in.places, imgPlace{
+				name:   args[0].Name(),
+				topY:   g.ctm[2][1] + absF(g.ctm[1][1]),
+				height: absF(g.ctm[1][1]),
+			})
 		}
 	})
-	return out, places
 }
 
 // imgPlace is an image draw: the XObject name, its top edge and height in page space.
@@ -209,10 +266,7 @@ type imgPlace struct {
 // (1 = 100%), leading tl.
 type gstate struct {
 	ctm, tm, tlm        matrix3
-	tf                  pdf.Font
-	metrics             *fontMetrics
-	decode              map[int]string
-	baseFont            string
+	font                *fontInfo
 	tfs, tc, tw, th, tl float64
 	trise               float64
 }
