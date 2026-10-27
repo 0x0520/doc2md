@@ -99,7 +99,7 @@ func TestDocumentNumbersLazyOrderedLists(t *testing.T) {
 		{Kind: Paragraph, Text: "between"},
 		item("3. kept"), item("4. as written"),
 	})
-	want := "- a\n- b\n\n1. one\n  - nested\n2. two\n  1. sub one\n  2. sub two\n3. three\n\nbetween\n\n3. kept\n4. as written\n"
+	want := "- a\n- b\n\n1. one\n   - nested\n2. two\n   1. sub one\n   2. sub two\n3. three\n\nbetween\n\n3. kept\n4. as written\n"
 	if got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}

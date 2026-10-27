@@ -20,10 +20,12 @@ type media struct {
 	seq    int
 	total  int
 	images []docimg.Image
+	// markers remembers the marker per part, so a picture used twice is extracted once.
+	markers map[string]string
 }
 
 func newMedia(zr *zip.Reader) *media {
-	m := &media{files: map[string]*zip.File{}}
+	m := &media{files: map[string]*zip.File{}, markers: map[string]string{}}
 	for _, f := range zr.File {
 		if strings.Contains(f.Name, "/media/") {
 			m.files[f.Name] = f
@@ -33,8 +35,12 @@ func newMedia(zr *zip.Reader) *media {
 }
 
 // marker extracts the image at part and returns its "[Image: N]" marker, or "" if
-// it is skipped (unknown type, size cap reached, unreadable or empty).
+// it is skipped (unknown type, size cap reached, unreadable or empty). A part that
+// was already extracted returns its first marker.
 func (m *media) marker(part string, page int) string {
+	if mk, ok := m.markers[part]; ok {
+		return mk
+	}
 	f := m.files[part]
 	if f == nil {
 		return ""
@@ -53,7 +59,9 @@ func (m *media) marker(part string, page int) string {
 	m.total += len(b)
 	m.seq++
 	m.images = append(m.images, docimg.Image{Seq: m.seq, Page: page, Bytes: b, Ext: ext})
-	return docimg.MarkerFor(m.seq)
+	mk := docimg.MarkerFor(m.seq)
+	m.markers[part] = mk
+	return mk
 }
 
 // relTargets resolves internal relationship targets to package paths. Relative

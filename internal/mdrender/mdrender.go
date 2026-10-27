@@ -209,6 +209,7 @@ func numberLists(blocks []Block) {
 			end++
 		}
 		numberRun(blocks[start:end])
+		indentRun(blocks[start:end])
 		start = end
 	}
 }
@@ -255,4 +256,33 @@ func numberRun(items []Block) {
 			items[i].Text = t[:m[4]] + strconv.Itoa(k+1) + t[m[5]:]
 		}
 	}
+}
+
+// indentRun re-indents nested items to their parent's content column, which
+// CommonMark requires for nesting: two spaces under "- ", three under "1. ".
+// Readers write two spaces per level. An item deeper than its parent moves up,
+// since four leading spaces would make it a code block.
+func indentRun(items []Block) {
+	var columns []int
+	for i, it := range items {
+		body := strings.TrimLeft(it.Text, " ")
+		level := min((len(it.Text)-len(body))/2, len(columns))
+		columns = columns[:level]
+		col := 0
+		if level > 0 {
+			col = columns[level-1]
+		}
+		items[i].Text = strings.Repeat(" ", col) + body
+		columns = append(columns, col+markerWidth(body))
+	}
+}
+
+func markerWidth(body string) int {
+	if m := orderedItemRe.FindStringSubmatch(body); m != nil {
+		return len(m[0])
+	}
+	if i := strings.IndexByte(body, ' '); i >= 0 {
+		return i + 1
+	}
+	return 2
 }

@@ -53,13 +53,61 @@ func ToMarkdown(data []byte) (string, []docimg.Image, error) {
 	return mdrender.Document(blocks), p.media.images, nil
 }
 
-// styleInfo is what heading detection needs from a style: its lowercased name,
-// outline level (-1 if unset) and parent style.
+// tri is a tri-state run property: inherited (unset), explicitly on or explicitly off.
+type tri int8
+
+const (
+	unset tri = iota
+	on
+	off
+)
+
+// styleInfo is what the parser needs from a style: its lowercased name, outline
+// level (-1 if unset), parent style, the list it joins (numID "" if none, ilvl -1 if
+// unset) and its character formatting.
 type styleInfo struct {
-	name    string
-	outline int
-	basedOn string
+	name                 string
+	outline              int
+	basedOn              string
+	numID                string
+	ilvl                 int
+	bold, italic, strike tri
 }
+
+// valAttr is an element that carries only w:val.
+type valAttr struct {
+	Val string `xml:"val,attr"`
+}
+
+// state reads a toggle property: a bare element is on, "0", "false" and "off" turn it off.
+func (v *valAttr) state() tri {
+	if v == nil {
+		return unset
+	}
+	return toggle(v.Val)
+}
+
+func toggle(val string) tri {
+	switch strings.ToLower(val) {
+	case "0", "false", "off":
+		return off
+	}
+	return on
+}
+
+// combine merges w:strike and w:dstrike: either one being on turns strikethrough on.
+func combine(a, b tri) tri {
+	if a == on || b == on {
+		return on
+	}
+	if a == off || b == off {
+		return off
+	}
+	return unset
+}
+
+// maxStyleChain bounds basedOn walks so a cyclic style definition terminates.
+const maxStyleChain = 10
 
 // parseStyles indexes word/styles.xml by style id; unparsable XML gives an empty map.
 func parseStyles(b []byte) map[string]styleInfo {
@@ -69,18 +117,22 @@ func parseStyles(b []byte) map[string]styleInfo {
 	}
 	var doc struct {
 		Styles []struct {
-			StyleID string `xml:"styleId,attr"`
-			Name    struct {
-				Val string `xml:"val,attr"`
-			} `xml:"name"`
-			BasedOn struct {
-				Val string `xml:"val,attr"`
-			} `xml:"basedOn"`
-			PPr struct {
-				OutlineLvl struct {
-					Val string `xml:"val,attr"`
-				} `xml:"outlineLvl"`
+			StyleID string  `xml:"styleId,attr"`
+			Name    valAttr `xml:"name"`
+			BasedOn valAttr `xml:"basedOn"`
+			PPr     struct {
+				OutlineLvl valAttr `xml:"outlineLvl"`
+				NumPr      struct {
+					Ilvl  *valAttr `xml:"ilvl"`
+					NumID *valAttr `xml:"numId"`
+				} `xml:"numPr"`
 			} `xml:"pPr"`
+			RPr struct {
+				B       *valAttr `xml:"b"`
+				I       *valAttr `xml:"i"`
+				Strike  *valAttr `xml:"strike"`
+				DStrike *valAttr `xml:"dstrike"`
+			} `xml:"rPr"`
 		} `xml:"style"`
 	}
 	if xml.Unmarshal(b, &doc) != nil {
@@ -90,15 +142,36 @@ func parseStyles(b []byte) map[string]styleInfo {
 		if s.StyleID == "" {
 			continue
 		}
-		info := styleInfo{name: strings.ToLower(strings.TrimSpace(s.Name.Val)), outline: -1, basedOn: s.BasedOn.Val}
+		info := styleInfo{
+			name:    strings.ToLower(strings.TrimSpace(s.Name.Val)),
+			outline: -1,
+			basedOn: s.BasedOn.Val,
+			ilvl:    -1,
+			bold:    s.RPr.B.state(),
+			italic:  s.RPr.I.state(),
+			strike:  combine(s.RPr.Strike.state(), s.RPr.DStrike.state()),
+		}
 		if s.PPr.OutlineLvl.Val != "" {
 			if n, err := strconv.Atoi(s.PPr.OutlineLvl.Val); err == nil {
 				info.outline = n
 			}
 		}
+		if v := s.PPr.NumPr.NumID; v != nil {
+			info.numID = v.Val
+		}
+		if v := s.PPr.NumPr.Ilvl; v != nil {
+			if n, err := strconv.Atoi(v.Val); err == nil {
+				info.ilvl = clampLevel(n)
+			}
+		}
 		out[s.StyleID] = info
 	}
 	return out
+}
+
+// clampLevel limits a list level to 0-8, the range Word allows.
+func clampLevel(n int) int {
+	return min(max(n, 0), 8)
 }
 
 // parseDefaultSize returns the document's default font size in half-points.
@@ -129,9 +202,9 @@ func parseDefaultSize(b []byte) int {
 }
 
 // headingLevel resolves a style to a Markdown heading depth, or 0 if it is not a
-// heading. The basedOn chain is followed at most 10 steps to survive cycles.
+// heading. The basedOn chain is followed at most maxStyleChain steps to survive cycles.
 func headingLevel(styles map[string]styleInfo, styleID string) int {
-	for i := 0; styleID != "" && i < 10; i++ {
+	for i := 0; styleID != "" && i < maxStyleChain; i++ {
 		s, ok := styles[styleID]
 		if !ok {
 			return 0
@@ -166,10 +239,16 @@ func headingFromName(name string) int {
 type numbering struct {
 	numToAbstract map[string]string
 	abstractFmt   map[string]map[int]string
+	// styleLvl maps abstract id -> style id -> the level that style is linked to.
+	styleLvl map[string]map[string]int
 }
 
 func parseNumbering(b []byte) *numbering {
-	n := &numbering{numToAbstract: map[string]string{}, abstractFmt: map[string]map[int]string{}}
+	n := &numbering{
+		numToAbstract: map[string]string{},
+		abstractFmt:   map[string]map[int]string{},
+		styleLvl:      map[string]map[string]int{},
+	}
 	if len(b) == 0 {
 		return n
 	}
@@ -177,30 +256,34 @@ func parseNumbering(b []byte) *numbering {
 		Abstract []struct {
 			ID   string `xml:"abstractNumId,attr"`
 			Lvls []struct {
-				Ilvl   string `xml:"ilvl,attr"`
-				NumFmt struct {
-					Val string `xml:"val,attr"`
-				} `xml:"numFmt"`
+				Ilvl   string  `xml:"ilvl,attr"`
+				NumFmt valAttr `xml:"numFmt"`
+				PStyle valAttr `xml:"pStyle"`
 			} `xml:"lvl"`
 		} `xml:"abstractNum"`
 		Nums []struct {
-			ID       string `xml:"numId,attr"`
-			Abstract struct {
-				Val string `xml:"val,attr"`
-			} `xml:"abstractNumId"`
+			ID       string  `xml:"numId,attr"`
+			Abstract valAttr `xml:"abstractNumId"`
 		} `xml:"num"`
 	}
 	if xml.Unmarshal(b, &doc) != nil {
 		return n
 	}
 	for _, a := range doc.Abstract {
-		m := map[int]string{}
+		fmts := map[int]string{}
+		links := map[string]int{}
 		for _, l := range a.Lvls {
-			if ilvl, err := strconv.Atoi(l.Ilvl); err == nil {
-				m[ilvl] = l.NumFmt.Val
+			ilvl, err := strconv.Atoi(l.Ilvl)
+			if err != nil {
+				continue
+			}
+			fmts[ilvl] = l.NumFmt.Val
+			if l.PStyle.Val != "" {
+				links[l.PStyle.Val] = clampLevel(ilvl)
 			}
 		}
-		n.abstractFmt[a.ID] = m
+		n.abstractFmt[a.ID] = fmts
+		n.styleLvl[a.ID] = links
 	}
 	for _, num := range doc.Nums {
 		n.numToAbstract[num.ID] = num.Abstract.Val
@@ -250,7 +333,15 @@ func parseRels(b []byte) map[string]string {
 	return out
 }
 
-// parser carries the lookup tables for one pass over word/document.xml.
+// field is one open complex field (fldChar begin ... end).
+type field struct {
+	instr  string
+	result bool // past the separator: text now belongs to the field's result
+	toc    bool // a table-of-contents field, whose result is dropped
+}
+
+// parser carries the lookup tables for one pass over word/document.xml. fields is
+// state that outlives a paragraph: a TOC field starts in one paragraph and ends in another.
 type parser struct {
 	styles      map[string]styleInfo
 	nums        *numbering
@@ -258,6 +349,7 @@ type parser struct {
 	defaultSize int
 	media       *media
 	embeds      map[string]string
+	fields      []field
 }
 
 // parseDocument streams document.xml into blocks. Top-level paragraphs and tables
@@ -266,6 +358,7 @@ func (p *parser) parseDocument(b []byte) []mdrender.Block {
 	dec := xml.NewDecoder(bytes.NewReader(b))
 	var blocks []mdrender.Block
 	var sizes []int
+	var plains []string
 	styled := false
 	for {
 		tok, err := dec.Token()
@@ -277,35 +370,40 @@ func (p *parser) parseDocument(b []byte) []mdrender.Block {
 			continue
 		}
 		switch se.Name.Local {
+		case "sdtPr":
+			// The headings already carry the structure a generated TOC repeats with page numbers.
+			if isTOCGallery(dec) {
+				skip(dec)
+			}
 		case "p":
-			if blk, size, ok := p.paragraphBlock(dec); ok {
+			if blk, plain, size, ok := p.paragraphBlock(dec); ok {
 				if size == 0 {
 					size = p.defaultSize
 				}
 				blocks = append(blocks, blk)
 				sizes = append(sizes, size)
+				plains = append(plains, plain)
 				styled = styled || blk.Kind == mdrender.Heading
 			}
 		case "tbl":
 			if blk, ok := p.tableBlock(dec); ok {
 				blocks = append(blocks, blk)
 				sizes = append(sizes, 0)
+				plains = append(plains, blk.Text)
 			}
 		}
 	}
 	// No paragraph used a heading style: fall back to inferring headings from font size.
 	if !styled {
-		promoteBySize(blocks, sizes)
+		promoteBySize(blocks, sizes, plains)
 	}
 	return blocks
 }
 
-// paragraphBlock reads a w:p whose start tag was consumed. It returns the block,
-// the largest run size in half-points, and false for an empty paragraph.
-func (p *parser) paragraphBlock(dec *xml.Decoder) (mdrender.Block, int, bool) {
-	styleID, numID, ilvl, hasNum := "", "", 0, false
-	size := 0
-	var sb strings.Builder
+// isTOCGallery reads a w:sdtPr and reports whether the content control is Word's
+// built-in table of contents.
+func isTOCGallery(dec *xml.Decoder) bool {
+	found := false
 	depth := 1
 	for depth > 0 {
 		tok, err := dec.Token()
@@ -314,46 +412,82 @@ func (p *parser) paragraphBlock(dec *xml.Decoder) (mdrender.Block, int, bool) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			switch t.Name.Local {
-			case "pPr":
-				styleID, numID, ilvl, hasNum = p.paragraphProps(dec)
-			case "r":
-				txt, sz := p.runText(dec)
-				sb.WriteString(txt)
-				if sz > size {
-					size = sz
-				}
-			case "hyperlink":
-				sb.WriteString(p.hyperlink(dec, t))
-			default:
-				skip(dec)
+			depth++
+			if t.Name.Local == "docPartGallery" && strings.EqualFold(attr(t, "val"), "Table of Contents") {
+				found = true
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+	return found
+}
+
+// numRef is the direct w:numPr of a paragraph.
+type numRef struct {
+	id      string
+	hasID   bool
+	ilvl    int
+	hasIlvl bool
+}
+
+// paraProps is what a paragraph's w:pPr contributes.
+type paraProps struct {
+	style string
+	num   numRef
+}
+
+// paragraphBlock reads a w:p whose start tag was consumed. It returns the block, its
+// text without emphasis markers, the largest run size in half-points, and false for
+// an empty paragraph.
+func (p *parser) paragraphBlock(dec *xml.Decoder) (blk mdrender.Block, plain string, size int, ok bool) {
+	var props paraProps
+	var segs []segment
+loop:
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "pPr" {
+				props = p.paragraphProps(dec)
+			} else {
+				segs = append(segs, p.inlineChild(dec, t)...)
 			}
 		case xml.EndElement:
 			if t.Name.Local == "p" {
-				depth = 0
+				break loop
 			}
 		}
 	}
 
-	text := collapseSpaces(sb.String())
-	if text == "" {
-		return mdrender.Block{}, 0, false
+	plain = collapseSpaces(renderSegments(segs, false))
+	if plain == "" {
+		return mdrender.Block{}, "", 0, false
 	}
-	if lvl := headingLevel(p.styles, styleID); lvl > 0 {
-		return mdrender.Block{Kind: mdrender.Heading, Level: lvl, Text: text}, size, true
+	for _, s := range segs {
+		size = max(size, s.size)
 	}
-	if hasNum {
+	// Heading text stays unformatted: styles often set bold on whole headings.
+	if lvl := headingLevel(p.styles, props.style); lvl > 0 {
+		return mdrender.Block{Kind: mdrender.Heading, Level: lvl, Text: plain}, plain, size, true
+	}
+	text := collapseSpaces(renderSegments(segs, true))
+	if ilvl, ordered, isList := p.listInfo(props); isList {
 		marker := "- "
-		if p.nums.ordered(numID, ilvl) {
+		if ordered {
 			marker = "1. "
 		}
 		indent := strings.Repeat("  ", ilvl)
-		return mdrender.Block{Kind: mdrender.List, Text: indent + marker + text}, size, true
+		return mdrender.Block{Kind: mdrender.List, Text: indent + marker + text}, plain, size, true
 	}
-	return mdrender.Block{Kind: mdrender.Paragraph, Text: text}, size, true
+	return mdrender.Block{Kind: mdrender.Paragraph, Text: text}, plain, size, true
 }
 
-func (p *parser) paragraphProps(dec *xml.Decoder) (styleID, numID string, ilvl int, hasNum bool) {
+func (p *parser) paragraphProps(dec *xml.Decoder) paraProps {
+	var pp paraProps
 	depth := 1
 	for depth > 0 {
 		tok, err := dec.Token()
@@ -364,9 +498,10 @@ func (p *parser) paragraphProps(dec *xml.Decoder) (styleID, numID string, ilvl i
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "pStyle":
-				styleID = attr(t, "val")
+				pp.style = attr(t, "val")
+				skip(dec)
 			case "numPr":
-				numID, ilvl, hasNum = p.numPr(dec)
+				pp.num = readNumPr(dec)
 			default:
 				skip(dec)
 			}
@@ -376,12 +511,12 @@ func (p *parser) paragraphProps(dec *xml.Decoder) (styleID, numID string, ilvl i
 			}
 		}
 	}
-	return
+	return pp
 }
 
-// numPr reads w:numPr. ilvl is clamped to 0-8, the range Word allows.
-func (p *parser) numPr(dec *xml.Decoder) (numID string, ilvl int, has bool) {
-	has = true
+// readNumPr reads w:numPr. ilvl is clamped to 0-8, the range Word allows.
+func readNumPr(dec *xml.Decoder) numRef {
+	var n numRef
 	depth := 1
 	for depth > 0 {
 		tok, err := dec.Token()
@@ -392,32 +527,169 @@ func (p *parser) numPr(dec *xml.Decoder) (numID string, ilvl int, has bool) {
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "ilvl":
-				if n, err := strconv.Atoi(attr(t, "val")); err == nil {
-					if n < 0 {
-						n = 0
-					} else if n > 8 {
-						n = 8
-					}
-					ilvl = n
+				if v, err := strconv.Atoi(attr(t, "val")); err == nil {
+					n.ilvl, n.hasIlvl = clampLevel(v), true
 				}
 			case "numId":
-				numID = attr(t, "val")
+				n.id, n.hasID = attr(t, "val"), true
 			}
-			if t.Name.Local != "numPr" {
-				skip(dec)
-			}
+			skip(dec)
 		case xml.EndElement:
 			if t.Name.Local == "numPr" {
 				depth = 0
 			}
 		}
 	}
-	return
+	return n
 }
 
-func (p *parser) runText(dec *xml.Decoder) (string, int) {
+// listInfo decides whether a paragraph is a list item and at which level. The
+// paragraph's own numPr wins over the style chain, and numId 0 means "no list".
+func (p *parser) listInfo(pp paraProps) (ilvl int, ordered, isList bool) {
+	numID, haveLvl := "", false
+	if pp.num.hasID {
+		numID = pp.num.id
+	}
+	if pp.num.hasIlvl {
+		ilvl, haveLvl = pp.num.ilvl, true
+	}
+	for id, i := pp.style, 0; id != "" && i < maxStyleChain; i++ {
+		st, ok := p.styles[id]
+		if !ok {
+			break
+		}
+		if numID == "" && !pp.num.hasID && st.numID != "" {
+			numID = st.numID
+		}
+		if !haveLvl && st.ilvl >= 0 {
+			ilvl, haveLvl = st.ilvl, true
+		}
+		id = st.basedOn
+	}
+	if numID == "" || numID == "0" {
+		return 0, false, false
+	}
+	if !haveLvl {
+		ilvl = p.linkedLevel(numID, pp.style)
+	}
+	return ilvl, p.nums.ordered(numID, ilvl), true
+}
+
+// linkedLevel returns the level of list numID that is linked to the style (or one of
+// its parents) through w:lvl/w:pStyle, or 0.
+func (p *parser) linkedLevel(numID, styleID string) int {
+	links := p.nums.styleLvl[p.nums.numToAbstract[numID]]
+	for i := 0; styleID != "" && i < maxStyleChain; i++ {
+		if lvl, ok := links[styleID]; ok {
+			return lvl
+		}
+		styleID = p.styles[styleID].basedOn
+	}
+	return 0
+}
+
+// segment is a piece of paragraph text with uniform formatting.
+type segment struct {
+	text                 string
+	bold, italic, strike bool
+	// raw text (picture markers, links) is emitted verbatim and never merged or emphasised.
+	raw  bool
+	size int // half-points, 0 if unknown
+}
+
+// inlineChild reads one inline element of a paragraph whose start tag was consumed.
+func (p *parser) inlineChild(dec *xml.Decoder, t xml.StartElement) []segment {
+	switch t.Name.Local {
+	case "r":
+		return p.runSegments(dec)
+	case "hyperlink":
+		return p.hyperlink(dec, t)
+	case "fldSimple":
+		if isTOCInstr(attr(t, "instr")) {
+			skip(dec)
+			return nil
+		}
+		return p.inlineSegments(dec, t.Name.Local)
+	case "ins", "smartTag":
+		return p.inlineSegments(dec, t.Name.Local)
+	}
+	skip(dec)
+	return nil
+}
+
+// inlineSegments reads inline children up to the end tag named end.
+func (p *parser) inlineSegments(dec *xml.Decoder, end string) []segment {
+	var segs []segment
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return segs
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			segs = append(segs, p.inlineChild(dec, t)...)
+		case xml.EndElement:
+			if t.Name.Local == end {
+				return segs
+			}
+		}
+	}
+}
+
+// isTOCInstr reports whether a field instruction is a table-of-contents field.
+func isTOCInstr(instr string) bool {
+	f := strings.Fields(instr)
+	return len(f) > 0 && strings.EqualFold(f[0], "TOC")
+}
+
+// fieldChar tracks complex fields: only the text between separate and end is the
+// field's result, and a TOC's result is dropped.
+func (p *parser) fieldChar(kind string) {
+	n := len(p.fields)
+	switch kind {
+	case "begin":
+		p.fields = append(p.fields, field{})
+	case "separate":
+		if n > 0 {
+			f := &p.fields[n-1]
+			f.result, f.toc = true, isTOCInstr(f.instr)
+		}
+	case "end":
+		if n > 0 {
+			p.fields = p.fields[:n-1]
+		}
+	}
+}
+
+// visible reports whether text at this point is document content rather than a
+// field instruction or a dropped field result.
+func (p *parser) visible() bool {
+	for _, f := range p.fields {
+		if !f.result || f.toc {
+			return false
+		}
+	}
+	return true
+}
+
+// runProps are the w:rPr values the converter uses.
+type runProps struct {
+	size                 int
+	style                string
+	bold, italic, strike tri
+}
+
+// runSegments reads a w:r whose start tag was consumed.
+func (p *parser) runSegments(dec *xml.Decoder) []segment {
+	var segs []segment
 	var sb strings.Builder
-	size := 0
+	var rp runProps
+	flush := func() {
+		if sb.Len() > 0 {
+			segs = append(segs, segment{text: sb.String()})
+			sb.Reset()
+		}
+	}
 	depth := 1
 	for depth > 0 {
 		tok, err := dec.Token()
@@ -428,16 +700,31 @@ func (p *parser) runText(dec *xml.Decoder) (string, int) {
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "t":
-				sb.WriteString(readText(dec))
+				if txt := readText(dec); p.visible() {
+					sb.WriteString(txt)
+				}
 			// Tabs and line breaks become spaces: a Markdown paragraph is a single line.
-			case "tab":
-				sb.WriteString(" ")
-			case "br", "cr":
-				sb.WriteString(" ")
+			case "tab", "br", "cr":
+				if p.visible() {
+					sb.WriteString(" ")
+				}
 			case "rPr":
-				size = p.runSize(dec)
+				rp = readRunProps(dec)
+			case "fldChar":
+				p.fieldChar(attr(t, "fldCharType"))
+				skip(dec)
+			case "instrText":
+				txt := readText(dec)
+				if n := len(p.fields); n > 0 && !p.fields[n-1].result {
+					p.fields[n-1].instr += txt
+				}
 			case "drawing", "pict", "object":
-				sb.WriteString(p.picture(dec, t.Name.Local))
+				if !p.visible() {
+					skip(dec)
+				} else if m := p.picture(dec, t.Name.Local); m != "" {
+					flush()
+					segs = append(segs, segment{text: m, raw: true})
+				}
 			default:
 				skip(dec)
 			}
@@ -447,11 +734,21 @@ func (p *parser) runText(dec *xml.Decoder) (string, int) {
 			}
 		}
 	}
-	return sb.String(), size
+	flush()
+
+	bold, italic, strike := p.format(rp)
+	for i := range segs {
+		segs[i].size = rp.size
+		if !segs[i].raw {
+			segs[i].bold, segs[i].italic, segs[i].strike = bold, italic, strike
+		}
+	}
+	return segs
 }
 
-func (p *parser) runSize(dec *xml.Decoder) int {
-	size := 0
+func readRunProps(dec *xml.Decoder) runProps {
+	var rp runProps
+	var strike, dstrike tri
 	depth := 1
 	for depth > 0 {
 		tok, err := dec.Token()
@@ -460,10 +757,21 @@ func (p *parser) runSize(dec *xml.Decoder) int {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "sz" {
+			switch t.Name.Local {
+			case "sz":
 				if n, err := strconv.Atoi(attr(t, "val")); err == nil {
-					size = n
+					rp.size = n
 				}
+			case "rStyle":
+				rp.style = attr(t, "val")
+			case "b":
+				rp.bold = toggle(attr(t, "val"))
+			case "i":
+				rp.italic = toggle(attr(t, "val"))
+			case "strike":
+				strike = toggle(attr(t, "val"))
+			case "dstrike":
+				dstrike = toggle(attr(t, "val"))
 			}
 			skip(dec)
 		case xml.EndElement:
@@ -472,39 +780,135 @@ func (p *parser) runSize(dec *xml.Decoder) int {
 			}
 		}
 	}
-	return size
+	rp.strike = combine(strike, dstrike)
+	return rp
+}
+
+// format resolves a run's emphasis: direct formatting wins over its character style
+// and that style's parents.
+func (p *parser) format(rp runProps) (bold, italic, strike bool) {
+	b, i, s := rp.bold, rp.italic, rp.strike
+	for id, n := rp.style, 0; id != "" && n < maxStyleChain; n++ {
+		st, ok := p.styles[id]
+		if !ok {
+			break
+		}
+		if b == unset {
+			b = st.bold
+		}
+		if i == unset {
+			i = st.italic
+		}
+		if s == unset {
+			s = st.strike
+		}
+		id = st.basedOn
+	}
+	return b == on, i == on, s == on
 }
 
 // hyperlink renders a w:hyperlink as a Markdown link, or as plain text when the
 // relationship does not resolve.
-func (p *parser) hyperlink(dec *xml.Decoder, start xml.StartElement) string {
-	rID := attr(start, "id")
+func (p *parser) hyperlink(dec *xml.Decoder, start xml.StartElement) []segment {
+	segs := p.inlineSegments(dec, "hyperlink")
+	label := renderSegments(segs, true)
+	url, ok := p.rels[attr(start, "id")]
+	if !ok || url == "" || strings.TrimSpace(label) == "" {
+		return segs
+	}
+	size := 0
+	for _, s := range segs {
+		size = max(size, s.size)
+	}
+	// Edge whitespace stays outside the brackets, where it separates words.
+	core := strings.TrimSpace(label)
+	lead, trail, _ := strings.Cut(label, core)
+	return []segment{{text: lead + "[" + core + "](" + url + ")" + trail, raw: true, size: size}}
+}
+
+// emphasis is the set of Markdown inline markers a segment carries.
+type emphasis struct{ bold, italic, strike bool }
+
+// renderSegments joins segments into one string. With format set, adjacent runs of
+// equal formatting merge (Word splits text into many runs) and are wrapped in
+// **bold**, _italic_ and ~~strike~~. Whitespace-only runs are never emphasised
+// themselves; they take the formatting their neighbours share, so "bold space bold"
+// stays one span.
+func renderSegments(segs []segment, format bool) string {
 	var sb strings.Builder
-	depth := 1
-	for depth > 0 {
-		tok, err := dec.Token()
-		if err != nil {
-			break
+	if !format {
+		for _, s := range segs {
+			sb.WriteString(s.text)
 		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			if t.Name.Local == "r" {
-				txt, _ := p.runText(dec)
-				sb.WriteString(txt)
-			} else {
-				skip(dec)
-			}
-		case xml.EndElement:
-			if t.Name.Local == "hyperlink" {
-				depth = 0
-			}
+		return sb.String()
+	}
+
+	n := len(segs)
+	em := make([]emphasis, n)
+	blank := make([]bool, n)
+	for i, s := range segs {
+		if s.raw {
+			continue
+		}
+		em[i] = emphasis{s.bold, s.italic, s.strike}
+		blank[i] = strings.TrimSpace(s.text) == ""
+	}
+	next := make([]emphasis, n)
+	var cur emphasis
+	for i := n - 1; i >= 0; i-- {
+		next[i] = cur
+		if !blank[i] {
+			cur = em[i]
 		}
 	}
-	text := sb.String()
-	if url, ok := p.rels[rID]; ok && url != "" && strings.TrimSpace(text) != "" {
-		return "[" + text + "](" + url + ")"
+	cur = emphasis{}
+	for i := range segs {
+		if blank[i] {
+			prev, nxt := cur, next[i]
+			em[i] = emphasis{prev.bold && nxt.bold, prev.italic && nxt.italic, prev.strike && nxt.strike}
+		} else {
+			cur = em[i]
+		}
 	}
-	return text
+
+	for i := 0; i < n; {
+		j := i + 1
+		if !segs[i].raw {
+			for j < n && !segs[j].raw && em[j] == em[i] {
+				j++
+			}
+		}
+		var group strings.Builder
+		for _, s := range segs[i:j] {
+			group.WriteString(s.text)
+		}
+		sb.WriteString(emphasize(group.String(), em[i]))
+		i = j
+	}
+	return sb.String()
+}
+
+// emphasize wraps the text in the markers of e, keeping edge whitespace outside
+// them: "** bold**" is not emphasis in Markdown.
+func emphasize(s string, e emphasis) string {
+	if e == (emphasis{}) {
+		return s
+	}
+	core := strings.TrimSpace(s)
+	if core == "" {
+		return s
+	}
+	lead, trail, _ := strings.Cut(s, core)
+	if e.strike {
+		core = "~~" + core + "~~"
+	}
+	if e.italic {
+		core = "_" + core + "_"
+	}
+	if e.bold {
+		core = "**" + core + "**"
+	}
+	return lead + core + trail
 }
 
 func (p *parser) tableBlock(dec *xml.Decoder) (mdrender.Block, bool) {
@@ -575,7 +979,7 @@ func (p *parser) cellText(dec *xml.Decoder) string {
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "p":
-				if blk, _, ok := p.paragraphBlock(dec); ok {
+				if blk, _, _, ok := p.paragraphBlock(dec); ok {
 					parts = append(parts, stripListMarker(blk))
 				}
 			case "tbl":
@@ -667,8 +1071,9 @@ const (
 
 // promoteBySize turns paragraphs set larger than the body text into headings, for
 // documents that use no heading styles. Body size is the one carrying the most
-// characters; larger sizes rank to levels 1.., biggest first.
-func promoteBySize(blocks []mdrender.Block, sizes []int) {
+// characters; larger sizes rank to levels 1.., biggest first. plains holds each
+// block's text without emphasis markers, which headings do not carry.
+func promoteBySize(blocks []mdrender.Block, sizes []int, plains []string) {
 	chars := map[int]int{}
 	paragraphs := 0
 	for i, blk := range blocks {
@@ -676,7 +1081,7 @@ func promoteBySize(blocks []mdrender.Block, sizes []int) {
 			continue
 		}
 		paragraphs++
-		chars[sizes[i]] += len(blk.Text)
+		chars[sizes[i]] += len(plains[i])
 	}
 	body, most := 0, 0
 	for size, n := range chars {
@@ -691,7 +1096,7 @@ func promoteBySize(blocks []mdrender.Block, sizes []int) {
 	candidates := 0
 	larger := map[int]bool{}
 	for i, blk := range blocks {
-		if isSizeHeading(blk, sizes[i], body) {
+		if isSizeHeading(blk, plains[i], sizes[i], body) {
 			candidates++
 			larger[sizes[i]] = true
 		}
@@ -710,14 +1115,14 @@ func promoteBySize(blocks []mdrender.Block, sizes []int) {
 		level[size] = i + 1
 	}
 	for i, blk := range blocks {
-		if isSizeHeading(blk, sizes[i], body) {
-			blocks[i] = mdrender.Block{Kind: mdrender.Heading, Level: level[sizes[i]], Text: blk.Text}
+		if isSizeHeading(blk, plains[i], sizes[i], body) {
+			blocks[i] = mdrender.Block{Kind: mdrender.Heading, Level: level[sizes[i]], Text: plains[i]}
 		}
 	}
 }
 
-func isSizeHeading(blk mdrender.Block, size, body int) bool {
-	return blk.Kind == mdrender.Paragraph && size > body && len(blk.Text) <= maxHeadingChars
+func isSizeHeading(blk mdrender.Block, plain string, size, body int) bool {
+	return blk.Kind == mdrender.Paragraph && size > body && len(plain) <= maxHeadingChars
 }
 
 // picture returns the marker for the image inside a drawing, pict or object

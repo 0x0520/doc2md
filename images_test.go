@@ -184,9 +184,9 @@ func slideXML(title string) string {
 		`</p:spTree></p:cSld></p:sld>`
 }
 
-func slideRels() string {
+func slideRels(image string) string {
 	return `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
-		`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>`
+		`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/` + image + `"/></Relationships>`
 }
 
 func pptxWithPicture(t testing.TB) []byte {
@@ -194,7 +194,7 @@ func pptxWithPicture(t testing.TB) []byte {
 		{"[Content_Types].xml", `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`},
 		{"ppt/presentation.xml", `<?xml version="1.0"?><p:presentation ` + pns + `/>`},
 		{"ppt/slides/slide1.xml", slideXML("First slide")},
-		{"ppt/slides/_rels/slide1.xml.rels", slideRels()},
+		{"ppt/slides/_rels/slide1.xml.rels", slideRels("image1.png")},
 		{"ppt/media/image1.png", onePixelPNG},
 	})
 }
@@ -205,10 +205,11 @@ func pptxWithTwoPictures(t testing.TB) []byte {
 		{"[Content_Types].xml", `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`},
 		{"ppt/presentation.xml", `<?xml version="1.0"?><p:presentation ` + pns + `/>`},
 		{"ppt/slides/slide1.xml", slideXML("First slide")},
-		{"ppt/slides/_rels/slide1.xml.rels", slideRels()},
+		{"ppt/slides/_rels/slide1.xml.rels", slideRels("image1.png")},
 		{"ppt/slides/slide2.xml", slideXML("Second slide")},
-		{"ppt/slides/_rels/slide2.xml.rels", slideRels()},
+		{"ppt/slides/_rels/slide2.xml.rels", slideRels("image2.png")},
 		{"ppt/media/image1.png", onePixelPNG},
+		{"ppt/media/image2.png", onePixelPNG},
 	})
 }
 
