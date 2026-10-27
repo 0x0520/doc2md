@@ -187,9 +187,6 @@ func resolve(base, href string) string {
 	return strings.TrimPrefix(path.Clean(path.Join(base, href)), "/")
 }
 
-// maxImageBytes caps the total image payload of one book; single entries are bounded by zipx.
-const maxImageBytes = 128 << 20
-
 // packageSink resolves chapter <img> sources to image entries in the archive.
 // base is set per chapter; one sink serves the whole book so numbering is continuous.
 type packageSink struct {
@@ -203,7 +200,7 @@ type packageSink struct {
 // Marker implements htmldoc.ImageSink. Anything it cannot resolve (web URLs,
 // missing entries, unknown formats) yields "" so the alt text is used instead.
 func (s *packageSink) Marker(src string) string {
-	if src == "" || s.total >= maxImageBytes {
+	if src == "" || s.total >= docimg.MaxTotalBytes {
 		return ""
 	}
 	// Any scheme (http:, data:) points outside the package.

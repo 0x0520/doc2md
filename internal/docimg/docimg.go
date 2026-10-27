@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// MaxTotalBytes caps the picture data extracted from one document; single zip
+// entries are bounded separately by zipx.
+const MaxTotalBytes = 128 << 20
+
 // Image is one raster or SVG figure extracted from a document. Seq is 1-based in
 // reading order and matches its marker; Page is the page, slide or sheet it sat
 // on (0 if the format has none); Ext is the lowercase extension without a dot.

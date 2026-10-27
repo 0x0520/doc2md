@@ -509,13 +509,10 @@ func repeat(t xml.StartElement, name string) int {
 	return n
 }
 
-// maxImageBytes caps the total image payload of one document.
-const maxImageBytes = 128 << 20
-
 // picture registers the package entry named by href and returns its marker, or
 // "" if it is missing, external or in an unsupported format.
 func (p *parser) picture(href string) string {
-	if href == "" || p.zr == nil || p.total >= maxImageBytes {
+	if href == "" || p.zr == nil || p.total >= docimg.MaxTotalBytes {
 		return ""
 	}
 	if strings.Contains(href, "://") {

@@ -10,9 +10,6 @@ import (
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
-// maxImageBytes caps the total image data extracted from one document.
-const maxImageBytes = 128 << 20
-
 // media extracts images from a package's media/ parts on demand and numbers them
 // in reading order.
 type media struct {
@@ -49,7 +46,7 @@ func (m *media) marker(part string, page int) string {
 	if ext == "" {
 		return ""
 	}
-	if m.total >= maxImageBytes {
+	if m.total >= docimg.MaxTotalBytes {
 		return ""
 	}
 	b, err := zipx.ReadEntry(f)

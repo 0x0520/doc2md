@@ -244,9 +244,6 @@ func sniffDelimiter(data []byte) rune {
 	return best
 }
 
-// maxPictureBytes caps the total picture data extracted from one workbook sheet.
-const maxPictureBytes = 128 << 20
-
 // sheetPictures returns the pictures on a sheet, numbered after alreadyTaken so
 // figure sequence numbers stay unique across the workbook.
 func sheetPictures(f *excelize.File, name string, sheetNum, alreadyTaken int) []docimg.Image {
@@ -264,7 +261,7 @@ func sheetPictures(f *excelize.File, name string, sheetNum, alreadyTaken int) []
 			continue
 		}
 		for _, pic := range pics {
-			if total >= maxPictureBytes {
+			if total >= docimg.MaxTotalBytes {
 				return out
 			}
 			ext := docimg.Ext(pic.Extension)

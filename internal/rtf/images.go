@@ -7,9 +7,6 @@ import (
 	"github.com/0x0520/doc2md/internal/docimg"
 )
 
-// maxPictureBytes caps the total picture data extracted from one document.
-const maxPictureBytes = 128 << 20
-
 // blipFormats maps picture control words to extensions. Only PNG and JPEG are
 // extracted; metafile and bitmap pictures are skipped.
 var blipFormats = map[string]string{
@@ -25,7 +22,7 @@ func (p *parser) picture(s string, from int) int {
 		return -1
 	}
 	ext, payload := blipPayload(body)
-	if ext == "" || p.total >= maxPictureBytes {
+	if ext == "" || p.total >= docimg.MaxTotalBytes {
 		return end
 	}
 	b, err := hex.DecodeString(payload)
