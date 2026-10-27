@@ -95,6 +95,82 @@ func TestBinarySkipped(t *testing.T) {
 	}
 }
 
+// Word's list definitions: \lsN selects a list whose level format says number or bullet.
+func TestListTableDecidesNumberedOrBullet(t *testing.T) {
+	in := `{\rtf1\ansi{\*\listtable` +
+		`{\list\listtemplateid1\listsimple{\listlevel\levelnfc0\levelnfcn0{\leveltext\'02\'00.;}}\listid-120}` +
+		`{\list\listtemplateid2\listsimple{\listlevel\levelnfc23\levelnfcn23{\leveltext\'01\u-3913 ?;}}\listid-119}}` +
+		`{\*\listoverridetable{\listoverride\listid-119\listoverridecount0\ls1}` +
+		`{\listoverride\listid-120\listoverridecount0\ls2}}` +
+		`\pard\ls1{\pntext\f3\'b7\tab}Apple\par` +
+		`\pard\ls1{\pntext\f3\'b7\tab}Pear\par` +
+		`\pard\ls2{\pntext 1.\tab}Receive\par` +
+		`\pard\ls2{\pntext 2.\tab}Validate\par}`
+	want := "- Apple\n- Pear\n\n1. Receive\n2. Validate\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// Without a list table the generated label is the only evidence.
+func TestListLabelDecidesNumberedOrBullet(t *testing.T) {
+	in := `{\rtf1\ansi\pard{\pntext\pard 1.\tab}Receive\par` +
+		`\pard{\pntext\pard 2.\tab}Validate\par}`
+	want := "1. Receive\n2. Validate\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+func TestTitleStyleIsHeading(t *testing.T) {
+	in := `{\rtf1\ansi{\stylesheet{\s0 Normal;}{\s1\outlinelevel0 \sbasedon0 heading 1;}` +
+		`{\*\cs25 \additive Title Zchn;}{\s24\ql \sbasedon0 \snext0 Title;}}` +
+		`\pard\s24 Specification\par\pard\s0 Intro.\par\pard\s1 Chapter\par}`
+	want := "# Specification\n\nIntro.\n\n## Chapter\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+func TestDocumentCodePage(t *testing.T) {
+	got := md(t, `{\rtf1\ansi\ansicpg1251\pard \'cf\'f0\'e8\'e2\'e5\'f2\par}`)
+	if got != "Привет\n" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A font's \fcharset overrides the document code page for the text set in it.
+func TestFontCharsetCodePage(t *testing.T) {
+	in := `{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fcharset0 Arial;}{\f1\fcharset204 Arial Cyr;}` +
+		`{\f2\fcharset161 Arial Greek;}{\f3\fcharset238 Arial CE;}{\f4\fcharset162 Arial Tur;}{\f5\fcharset186 Arial Baltic;}}` +
+		`\pard\f0 caf\'e9\par\pard\f1 \'cf\'f0\'e8\'e2\'e5\'f2\par\pard\f2 \'c1\'e5\'f4\par` +
+		`\pard\f3 \'b3\par\pard\f4 \'f0\par\pard\f5 \'e0\par` +
+		`\pard{\f1 \'cf}\f0 \'e9\par}`
+	want := "café\n\nПривет\n\nΑετ\n\nł\n\nğ\n\ną\n\nПé\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// A TOC field's result is generated page text; other fields keep theirs.
+func TestTOCFieldDropped(t *testing.T) {
+	in := `{\rtf1\ansi\pard Contents\par` +
+		`{\field{\*\fldinst {\rtlch TOC \\o "1-3" }}{\fldrslt 1 Introduction\tab 3\par 2 Scope\tab 4\par}}` +
+		`\pard Page {\field{\*\fldinst PAGE}{\fldrslt 7}}, Table {\field{\*\fldinst SEQ Table}{\fldrslt 1}}\par}`
+	want := "Contents\n\nPage 7, Table 1\n"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// A list label inside a table cell must not turn the next paragraph into a list item.
+func TestListLabelInCellDoesNotLeak(t *testing.T) {
+	in := `{\rtf1\ansi\trowd{\pntext\pard 1.\tab}One\cell Two\cell\row\pard After.\par}`
+	if got := md(t, in); strings.Contains(got, "- After") || strings.Contains(got, "1. After") {
+		t.Errorf("label leaked: %q", got)
+	}
+}
+
 func TestNotRTF(t *testing.T) {
 	if _, _, err := ToMarkdown([]byte("Just a plain sentence.")); err == nil {
 		t.Fatal("expected an error for non-RTF bytes, got nil")
