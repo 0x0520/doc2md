@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -40,7 +41,7 @@ func ToMarkdownWith(data []byte, sink ImageSink) (string, error) {
 	if sink == nil {
 		sink = noImages{}
 	}
-	root, err := html.Parse(bytes.NewReader(data))
+	root, err := html.Parse(bytes.NewReader(toUTF8(data)))
 	if err != nil {
 		return "", err
 	}
@@ -74,12 +75,12 @@ func samePhrase(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	return strings.EqualFold(collapse(a), collapse(b))
+	return strings.EqualFold(Collapse(a), Collapse(b))
 }
 
 func findTitle(n *html.Node) string {
 	if n.Type == html.ElementNode && n.DataAtom == atom.Title {
-		return collapse(text(n))
+		return Collapse(text(n))
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if t := findTitle(c); t != "" {
@@ -95,13 +96,13 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 		if c.Type != html.ElementNode {
 			if c.Type == html.TextNode {
 				// Bare text outside any block element is still content.
-				if s := collapse(c.Data); s != "" {
+				if s := Collapse(c.Data); s != "" {
 					*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: s})
 				}
 			}
 			continue
 		}
-		if dropped[c.DataAtom] {
+		if dropped[c.DataAtom] || isWordTOC(c) {
 			continue
 		}
 		switch c.DataAtom {
@@ -114,6 +115,12 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 				})
 			}
 		case atom.P, atom.Blockquote, atom.Dd, atom.Dt, atom.Figcaption, atom.Caption:
+			if c.DataAtom == atom.P {
+				if item, ok := wordListItem(c, sink); ok {
+					*out = append(*out, item)
+					continue
+				}
+			}
 			if s := inlineText(c, sink); s != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: s})
 			}
@@ -132,9 +139,9 @@ func walk(n *html.Node, out *[]mdrender.Block, sink ImageSink) {
 		// A standalone image becomes its own block. If the sink cannot resolve it,
 		// alt text is used: a marker pointing at no bytes is worse than none.
 		case atom.Img:
-			if m := sink.Marker(attr(c, "src")); m != "" {
+			if m := sink.Marker(Attr(c, "src")); m != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: m})
-			} else if alt := attr(c, "alt"); alt != "" {
+			} else if alt := Attr(c, "alt"); alt != "" {
 				*out = append(*out, mdrender.Block{Kind: mdrender.Paragraph, Text: alt})
 			}
 		case atom.Br, atom.Hr, atom.Input:
@@ -219,7 +226,7 @@ func hasBlocks(n *html.Node) bool {
 				atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
 				return true
 			case atom.P, atom.Div:
-				if collapse(text(c)) != "" {
+				if Collapse(text(c)) != "" {
 					paragraphs++
 				}
 				if paragraphs > 1 || look(c) {
@@ -317,7 +324,7 @@ func inlineText(n *html.Node, sink ImageSink) string {
 			switch {
 			case c.Type == html.TextNode:
 				b.WriteString(c.Data)
-			case c.Type != html.ElementNode || dropped[c.DataAtom]:
+			case c.Type != html.ElementNode || dropped[c.DataAtom] || isMsoIgnore(c):
 			// Nested lists are emitted as blocks by emitList; including them here would duplicate them.
 			case c.DataAtom == atom.Ul || c.DataAtom == atom.Ol:
 			case c.DataAtom == atom.Br:
@@ -335,16 +342,16 @@ func inlineText(n *html.Node, sink ImageSink) string {
 				b.WriteString(wrap(text(c), "`"))
 			case c.DataAtom == atom.A:
 				label := inlineText(c, sink)
-				if href := attr(c, "href"); href != "" && label != "" && !strings.HasPrefix(href, "javascript:") {
+				if href := Attr(c, "href"); href != "" && label != "" && !activeScheme(href) {
 					b.WriteString("[" + label + "](" + href + ")")
 				} else {
 					b.WriteString(label)
 				}
 			// The marker is padded so it does not fuse with surrounding words.
 			case c.DataAtom == atom.Img:
-				if m := sink.Marker(attr(c, "src")); m != "" {
+				if m := sink.Marker(Attr(c, "src")); m != "" {
 					b.WriteString(" " + m + " ")
-				} else if alt := attr(c, "alt"); alt != "" {
+				} else if alt := Attr(c, "alt"); alt != "" {
 					b.WriteString(alt)
 				}
 			default:
@@ -353,7 +360,7 @@ func inlineText(n *html.Node, sink ImageSink) string {
 		}
 	}
 	add(n)
-	return collapse(b.String())
+	return Collapse(b.String())
 }
 
 // wrap returns "" for blank text so an empty element leaves no stray markers.
@@ -380,7 +387,8 @@ func text(n *html.Node) string {
 	return b.String()
 }
 
-func attr(n *html.Node, name string) string {
+// Attr returns the value of the named attribute, or "" if it is absent.
+func Attr(n *html.Node, name string) string {
 	for _, a := range n.Attr {
 		if a.Key == name {
 			return a.Val
@@ -389,4 +397,24 @@ func attr(n *html.Node, name string) string {
 	return ""
 }
 
-func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
+// activeScheme reports whether href runs code or embeds a payload instead of
+// pointing at a document. Browsers ignore leading whitespace and control
+// characters and drop tabs and newlines inside the scheme, so both are removed
+// before matching.
+func activeScheme(href string) bool {
+	clean := strings.Map(func(r rune) rune {
+		if r <= ' ' || r == 0x7f {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, href)
+	for _, scheme := range []string{"javascript:", "vbscript:", "data:"} {
+		if strings.HasPrefix(clean, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// Collapse joins the whitespace-separated fields of s with single spaces.
+func Collapse(s string) string { return strings.Join(strings.Fields(s), " ") }

@@ -2,6 +2,7 @@ package epub
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"path"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 
+	"github.com/0x0520/doc2md/internal/htmldoc"
 	"github.com/0x0520/doc2md/internal/zipx"
 )
 
@@ -55,7 +57,7 @@ func depthsFromXHTML(zr *zip.Reader, base, href string) map[string]int {
 	if raw == nil {
 		return nil
 	}
-	root, err := html.Parse(strings.NewReader(string(raw)))
+	root, err := html.Parse(bytes.NewReader(raw))
 	if err != nil {
 		return nil
 	}
@@ -76,7 +78,7 @@ func tocList(n *html.Node) *html.Node {
 	walk = func(n *html.Node, inToc bool) {
 		if n.Type == html.ElementNode {
 			if n.Data == "nav" {
-				t := attrOf(n, "epub:type")
+				t := htmldoc.Attr(n, "epub:type")
 				// An unmarked <nav> is taken as the toc.
 				inToc = t == "" || strings.Contains(t, "toc")
 			}
@@ -114,7 +116,7 @@ func walkList(list *html.Node, depth int, base string, out map[string]int) {
 			}
 			switch c.DataAtom {
 			case atom.A:
-				if h := attrOf(c, "href"); h != "" {
+				if h := htmldoc.Attr(c, "href"); h != "" {
 					record(out, resolve(base, h), depth)
 				}
 			case atom.Ol, atom.Ul:
@@ -159,15 +161,6 @@ func depthsFromNCX(zr *zip.Reader, base, href string) map[string]int {
 	}
 	walk(doc.Points, 1)
 	return out
-}
-
-func attrOf(n *html.Node, key string) string {
-	for _, a := range n.Attr {
-		if a.Key == key {
-			return a.Val
-		}
-	}
-	return ""
 }
 
 // shiftHeadings pushes chapter headings down n levels (capped at 6) so a

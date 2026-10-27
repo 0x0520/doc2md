@@ -148,12 +148,10 @@ func opensWith(chapter, title string) bool {
 			return false
 		}
 		heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
-		return strings.EqualFold(collapse(heading), collapse(title))
+		return strings.EqualFold(htmldoc.Collapse(heading), htmldoc.Collapse(title))
 	}
 	return false
 }
-
-func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // packagePath returns the package document's path from container.xml.
 func packagePath(zr *zip.Reader) (string, error) {

@@ -84,8 +84,9 @@ func ToMarkdown(data []byte) (string, error) {
 	var out []string
 	inVerbatim := false
 	// emit collapses blank-line runs: dropped markup and table padding would otherwise leave gaps.
+	// It is never called inside a verbatim block, whose lines are appended as they are.
 	emit := func(line string) {
-		if !inVerbatim && strings.TrimSpace(line) == "" {
+		if strings.TrimSpace(line) == "" {
 			if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) == "" {
 				return
 			}
@@ -264,8 +265,12 @@ func splitCells(body string) []cell {
 	}
 	_, spec := takeCellSpec(fields[0])
 	var cells []cell
-	for _, f := range fields[1:] {
-		text, next := takeCellSpec(f)
+	for i, f := range fields[1:] {
+		// The last field is followed by no separator, so nothing in it can be a specifier.
+		text, next := strings.TrimSpace(inline(f)), defaultSpec
+		if i < len(fields)-2 {
+			text, next = takeCellSpec(f)
+		}
 		for k := 0; k < spec.dup; k++ {
 			cells = append(cells, cell{text: text, colspan: spec.colspan, rowspan: spec.rowspan})
 		}
@@ -295,6 +300,7 @@ func splitUnescaped(s string) []string {
 // takeCellSpec splits a trailing specifier off a field; it describes the NEXT
 // cell. The field is not right-trimmed: a specifier touches the separator, so
 // trailing whitespace means none (a lone "a" cell is text, not a style marker).
+// Only fields that a separator follows may carry one; see splitCells.
 func takeCellSpec(field string) (text string, spec cellSpec) {
 	field = inline(field)
 	tok := field[strings.LastIndexAny(field, " \t\n")+1:]

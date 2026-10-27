@@ -226,3 +226,32 @@ func TestToMarkdown_UnclosedTable(t *testing.T) {
 		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
 	}
 }
+
+// The last cell of a body has no separator after it, so a trailing style letter is text.
+func TestToMarkdown_LastCellStyleLetterIsText(t *testing.T) {
+	for _, letter := range []string{"a", "e", "h", "l", "m", "d", "s", "v"} {
+		in := "|===\n|Name |Grade\n|Vitamin |" + letter + "\n|==="
+		want := "| Name | Grade |\n|---|---|\n| Vitamin | " + letter + " |"
+		if got := md(t, in); got != want {
+			t.Errorf("letter %q: got:\n%q\n\nwant:\n%q", letter, got, want)
+		}
+	}
+}
+
+// A style letter that touches a following separator is still a specifier.
+func TestToMarkdown_StyleLetterBeforeSeparatorStaysSpec(t *testing.T) {
+	in := "|===\n|Name |Grade\n|Vitamin a|C\n|==="
+	want := "| Name | Grade |\n|---|---|\n| Vitamin | C |"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}
+
+// Blank lines inside a verbatim block are content, not collapsible spacing.
+func TestToMarkdown_VerbatimKeepsBlankLines(t *testing.T) {
+	in := "----\na\n\n\nb\n----"
+	want := "```\na\n\n\nb\n```"
+	if got := md(t, in); got != want {
+		t.Errorf("got:\n%q\n\nwant:\n%q", got, want)
+	}
+}

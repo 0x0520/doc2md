@@ -235,3 +235,23 @@ func TestNoNavigationLeavesChaptersFlat(t *testing.T) {
 		t.Errorf("nesting invented without a navigation document:\n%s", got)
 	}
 }
+
+// A chapter in a legacy encoding declares it in the XML declaration, not in a <meta>.
+func TestChapterEncodingFromXMLDeclaration(t *testing.T) {
+	ch := "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n" +
+		"<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Gr\xfc\xdfe</title></head>" +
+		"<body><h1>Gr\xfc\xdfe</h1><p>Sch\xf6ne Gr\xfc\xdfe.</p></body></html>"
+	data := book(t,
+		[2]string{"mimetype", "application/epub+zip"},
+		[2]string{"META-INF/container.xml", containerXML},
+		[2]string{"OEBPS/book.opf", opf(`<itemref idref="c1"/>`)},
+		[2]string{"OEBPS/ch1.xhtml", ch},
+	)
+	got, _, err := ToMarkdown(data)
+	if err != nil {
+		t.Fatalf("ToMarkdown: %v", err)
+	}
+	if !strings.Contains(got, "Schöne Grüße.") || strings.ContainsRune(got, '�') {
+		t.Errorf("chapter was not transcoded from its declared encoding:\n%q", got)
+	}
+}

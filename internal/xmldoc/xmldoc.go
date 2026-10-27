@@ -84,18 +84,28 @@ func (n *node) flatten() string {
 // leaf reports whether the node has no child elements.
 func (n *node) leaf() bool { return len(n.kids) == 0 }
 
-// fields returns attributes followed by leaf children as name/value pairs, one
-// table row's worth; attributes and child elements are treated alike.
-func (n *node) fields() [][2]string {
-	out := make([][2]string, 0, len(n.attrs)+len(n.kids))
+// fields returns attributes, own text (labelled textLabel) and leaf children as
+// name/value pairs; attributes and child elements are treated alike. With
+// skipRuns, children that render as a table (see recordRun) are left out.
+func (n *node) fields(textLabel string, skipRuns bool) [][2]string {
+	out := make([][2]string, 0, len(n.attrs)+len(n.kids)+1)
 	out = append(out, n.attrs...)
 	if n.text != "" {
-		out = append(out, [2]string{n.name, n.text})
+		out = append(out, [2]string{textLabel, n.text})
 	}
-	for _, k := range n.kids {
-		if v := k.value(); k.leaf() && v != "" {
-			out = append(out, [2]string{k.name, v})
+	for i := 0; i < len(n.kids); {
+		if skipRuns {
+			if run := recordRun(n.kids, i); run >= minTableRows {
+				i += run
+				continue
+			}
 		}
+		if k := n.kids[i]; k.leaf() {
+			if v := k.value(); v != "" {
+				out = append(out, [2]string{k.name, v})
+			}
+		}
+		i++
 	}
 	return out
 }
@@ -215,7 +225,7 @@ func render(n *node, level int, out *[]string) {
 	}
 	*out = append(*out, strings.Repeat("#", min(level, 6))+" "+n.name, "")
 
-	if fields := ownFields(n); len(fields) > 0 {
+	if fields := n.fields("text", true); len(fields) > 0 {
 		for _, f := range fields {
 			*out = append(*out, "**"+f[0]+":** "+f[1])
 		}
@@ -240,28 +250,6 @@ func render(n *node, level int, out *[]string) {
 	}
 }
 
-// ownFields returns what sits directly under a container's heading: attributes,
-// own text and leaf children that are not part of a record run.
-func ownFields(n *node) [][2]string {
-	out := append([][2]string(nil), n.attrs...)
-	if n.text != "" {
-		out = append(out, [2]string{"text", n.text})
-	}
-	for i := 0; i < len(n.kids); {
-		if run := recordRun(n.kids, i); run >= minTableRows {
-			i += run
-			continue
-		}
-		if k := n.kids[i]; k.leaf() {
-			if v := k.value(); v != "" {
-				out = append(out, [2]string{k.name, v})
-			}
-		}
-		i++
-	}
-	return out
-}
-
 // recordRun returns how many consecutive siblings from i share a name and are
 // records; such a run is rendered as a table body.
 func recordRun(kids []*node, i int) int {
@@ -283,7 +271,7 @@ func isRecord(n *node) bool {
 			return false
 		}
 	}
-	return len(n.fields()) > 0
+	return len(n.fields(n.name, false)) > 0
 }
 
 // recordTable renders records as a pipe table. Columns are the union of field
@@ -292,7 +280,7 @@ func recordTable(records []*node) string {
 	var cols []string
 	seen := map[string]bool{}
 	for _, r := range records {
-		for _, f := range r.fields() {
+		for _, f := range r.fields(r.name, false) {
 			if !seen[f[0]] {
 				seen[f[0]] = true
 				cols = append(cols, f[0])
@@ -305,7 +293,7 @@ func recordTable(records []*node) string {
 	grid := [][]string{cols}
 	for _, r := range records {
 		row := make([]string, len(cols))
-		for _, f := range r.fields() {
+		for _, f := range r.fields(r.name, false) {
 			for c, name := range cols {
 				if name == f[0] {
 					if row[c] == "" {
