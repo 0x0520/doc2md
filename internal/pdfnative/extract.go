@@ -143,11 +143,15 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 	if !verbatim {
 		pages = dropCoverPage(pages)
 		pages = dropTOCPages(pages)
+	}
+	// Before the running feet go: a numeric note label alone at the foot reads as a page number.
+	notes := extractNotes(pages)
+	if !verbatim {
 		dropRunningHeadFoot(pages)
 	}
 	for pi := range pages {
 		// Columns are reordered before tables are assembled so the gutter is not read as a cell gap.
-		pages[pi].rows = splitColumnRows(pages[pi].rows)
+		pages[pi].rows = splitColumnRows(orderNearBaselines(pages[pi].rows))
 		pages[pi].lines = assembleRows(pages[pi].rows, verbatim, pages[pi].links)
 		for li := range pages[pi].lines {
 			pages[pi].lines[li].page = pages[pi].num
@@ -157,6 +161,10 @@ func renderPDFBody(data []byte, verbatim bool) (string, []Image, []PageBreak, er
 
 	body := bodyFontSize(pages)
 	blocks := groupBlocks(pages, body, verbatim)
+	// Appended after grouping so that note text never takes part in heading inference.
+	for _, n := range notes {
+		blocks = append(blocks, block{kind: kindParagraph, text: n})
+	}
 
 	md, breaks := renderWithBreaks(blocks)
 	if strings.TrimSpace(md) == "" {

@@ -9,8 +9,19 @@ import (
 	"github.com/0x0520/doc2md/internal/mdrender"
 )
 
-// listItemRe matches a bullet or numbered list item with text after the marker.
-var listItemRe = regexp.MustCompile(`^\s*([-*•]|\d+[.)])\s+\S`)
+// listItemRe matches a bullet or numbered list item with text after the marker. A
+// lowercase letter or roman numeral ("a)", "iv.") marks a nested outline level;
+// capitals are left out because "A. Smith" opens prose as often as a list.
+var listItemRe = regexp.MustCompile(`^\s*([-*•]|\d+[.)]|[a-z][.)]|[ivx]{2,4}[.)])\s+\S`)
+
+// abbrevRe matches a line opened by an abbreviation of single letters ("z. B.", "d. h."),
+// which has the shape of a letter marker.
+var abbrevRe = regexp.MustCompile(`^\s*\p{L}\.\s*\p{L}{1,2}\.`)
+
+// isListItem reports whether text opens a list item.
+func isListItem(text string) bool {
+	return listItemRe.MatchString(text) && !abbrevRe.MatchString(text)
+}
 
 type blockKind int
 
@@ -170,7 +181,7 @@ func groupBlocks(pages []page, body float64, verbatim bool) []block {
 				cp := ln
 				paraPrev = &cp
 			}
-		case listItemRe.MatchString(text):
+		case isListItem(text):
 			flush()
 			var bodyLine line
 			itemPrefix, bodyLine = splitListItem(ln, nestLevel(&listXs, ln.xStart, 0.5*maxF(ln.fontSize, body)))
@@ -437,12 +448,23 @@ func joinWrapped(acc, next string) string {
 // orderedItemRe matches a number marker that Markdown accepts for an ordered list (at most nine digits).
 var orderedItemRe = regexp.MustCompile(`^(\d{1,9}[.)])\s+`)
 
-// normalizeListMarker keeps a number marker ("1.", "2)") as an ordered list item and
-// rewrites any leading bullet glyph to a Markdown "- " marker.
+// letterItemRe matches the letter and roman markers of listItemRe.
+var letterItemRe = regexp.MustCompile(`^(?:[a-z]|[ivx]{2,4})[.)]\s+`)
+
+// normalizeListMarker keeps a number marker ("1.", "2)") as an ordered list item, writes
+// a letter or roman marker as "1." and rewrites any leading bullet glyph to a Markdown
+// "- " marker.
 func normalizeListMarker(text string) string {
 	trimmed := strings.TrimLeft(text, " \t")
 	if m := orderedItemRe.FindStringSubmatch(trimmed); m != nil {
-		return m[1] + " " + trimmed[len(m[0]):]
+		// "1)" becomes "1.": CommonMark starts a new list when the delimiter changes.
+		number := m[1][:len(m[1])-1]
+		return number + ". " + trimmed[len(m[0]):]
+	}
+	// Markdown numbers lists with digits only; the nesting carries the outline level and
+	// mdrender numbers a run of "1." items.
+	if m := letterItemRe.FindString(trimmed); m != "" {
+		return "1. " + trimmed[len(m):]
 	}
 	for {
 		stripped := false

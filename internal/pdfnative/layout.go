@@ -312,3 +312,22 @@ func maxF(a, b float64) float64 {
 func roundHalf(v float64) float64 {
 	return float64(int(v*2+0.5)) / 2
 }
+
+// orderNearBaselines puts two adjacent rows whose baselines nearly coincide (within a
+// quarter of the size, just outside sameLine) left before right. A text box laid over
+// a line of text is such a row: by baseline it would come first and cut off the line
+// it sits on.
+func orderNearBaselines(rows [][]pdf.Text) [][]pdf.Text {
+	for i := 1; i < len(rows); i++ {
+		a, b := rows[i-1], rows[i]
+		fa, fb := dominantSize(a), dominantSize(b)
+		fs := maxF(fa, fb)
+		if fs == 0 || !within(fa, fb, 0.12) || rowBaseline(a)-rowBaseline(b) >= 0.25*fs {
+			continue
+		}
+		if minStart(b) < minStart(a)-fs {
+			rows[i-1], rows[i] = b, a
+		}
+	}
+	return rows
+}

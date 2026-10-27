@@ -366,3 +366,69 @@ func TestGolden_SlideTitlesTwoLines(t *testing.T) {
 	)
 	assertGolden(t, "slide_titles_two_lines", md)
 }
+
+// TestGolden_OutlineLetters is Word's default outline numbering "1)", "a)", "i)": each
+// marker is its own item, nested by its indent.
+func TestGolden_OutlineLetters(t *testing.T) {
+	md := renderSynth(t, synthPage{runs: []textRun{
+		{text: "Outline numbering", x: 72, yTop: 100, size: 15, bold: true},
+		{text: "1) First level", x: 72, yTop: 130, size: 10},
+		{text: "a) Second level", x: 90, yTop: 130 + bodyLead, size: 10},
+		{text: "b) Second level again", x: 90, yTop: 130 + 2*bodyLead, size: 10},
+		{text: "i) Third level", x: 108, yTop: 130 + 3*bodyLead, size: 10},
+		{text: "ii) Third level again", x: 108, yTop: 130 + 4*bodyLead, size: 10},
+		{text: "2) First level again", x: 72, yTop: 130 + 5*bodyLead, size: 10},
+	}})
+	assertGolden(t, "outline_letters", md)
+}
+
+// TestGolden_HeadingsAroundTable has headings in one size and weight around a table:
+// the table between them is their neighbour, not the heading on its other side.
+func TestGolden_HeadingsAroundTable(t *testing.T) {
+	runs := []textRun{
+		{text: "Overview", x: 72, yTop: 100, size: 15},
+		{text: "The report lists the states of an entry.", x: 72, yTop: 125, size: 10},
+		{text: "Status values", x: 72, yTop: 160, size: 15},
+	}
+	runs = append(runs, statusTable(185)...)
+	runs = append(runs,
+		textRun{text: "Deadlines", x: 72, yTop: 250, size: 15},
+		textRun{text: "The deadlines apply from receipt of the report.", x: 72, yTop: 275, size: 10},
+	)
+	assertGolden(t, "headings_around_table", renderSynth(t, synthPage{runs: runs}))
+}
+
+// noteRuns sets text, then a superscript note mark directly after it, then more text,
+// with x positions from the same width estimate the reader falls back to.
+func noteRuns(x, yTop float64, before, mark, after string) []textRun {
+	mx := x + estimateWidth(before, 10)
+	ax := mx + estimateWidth(mark, 6)
+	if !strings.HasPrefix(after, ".") {
+		ax += estimateWidth(" ", 10)
+	}
+	return []textRun{
+		{text: before, x: x, yTop: yTop, size: 10},
+		{text: mark, x: mx, yTop: yTop - 3.5, size: 6},
+		{text: after, x: ax, yTop: yTop, size: 10},
+	}
+}
+
+// TestGolden_Footnotes has a footnote at the foot of page 1 (its label alone on a row
+// above the note, where it would pass for a page number) and an endnote on page 2.
+// Both become references numbered in order and definitions at the end.
+func TestGolden_Footnotes(t *testing.T) {
+	p1 := []textRun{{text: "Notes", x: 72, yTop: 100, size: 15, bold: true}}
+	p1 = append(p1, noteRuns(72, 130, "A sentence with a footnote", "1", "and more text.")...)
+	p1 = append(p1,
+		textRun{text: "The paragraph goes on here.", x: 72, yTop: 130 + bodyLead, size: 10},
+		textRun{text: "1", x: 72, yTop: 776.5, size: 6},
+		textRun{text: "The footnote text.", x: 76, yTop: 780, size: 8},
+	)
+	p2 := noteRuns(72, 100, "A second page with an endnote", "i", ".")
+	p2 = append(p2,
+		textRun{text: "i", x: 72, yTop: 296.5, size: 6},
+		textRun{text: "The endnote text wraps", x: 76, yTop: 300, size: 8},
+		textRun{text: "onto a second line.", x: 76, yTop: 310, size: 8},
+	)
+	assertGolden(t, "footnotes", renderSynth(t, synthPage{runs: p1}, synthPage{runs: p2}))
+}

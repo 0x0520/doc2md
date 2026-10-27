@@ -315,9 +315,11 @@ func TestNormalizeListMarker(t *testing.T) {
 		{"- already Markdown", "- already Markdown"},
 		{"* Asterisk", "- Asterisk"},
 		{"1. Numbered", "1. Numbered"},
-		{"2) Also numbered", "2) Also numbered"},
+		{"2) Also numbered", "2. Also numbered"},
 		{"  12.  Indented number", "12. Indented number"},
 		{"• 3. Bullet before a number", "- 3. Bullet before a number"},
+		{"a) Letter marker", "1. Letter marker"},
+		{"iv. Roman marker", "1. Roman marker"},
 	}
 	for _, tc := range tests {
 		if got := normalizeListMarker(tc.in); got != tc.want {

@@ -73,19 +73,19 @@ func classifyHeading(lines []line, i int, st docStats, chapterSeq map[int]bool) 
 		return 0, "", false, false, 0
 	}
 
-	var prev, next *line
-	for k := i - 1; k >= 0; k-- {
-		if !lines[k].pre {
-			prev = &lines[k]
-			break
+	// A table beside the line counts as a neighbour of body text. Skipping it would
+	// measure a heading over a table against the heading under it.
+	neighbour := func(k int) *line {
+		if k < 0 || k >= len(lines) {
+			return nil
 		}
-	}
-	for k := i + 1; k < len(lines); k++ {
-		if !lines[k].pre {
-			next = &lines[k]
-			break
+		nb := lines[k]
+		if nb.pre {
+			nb.text, nb.fontSize, nb.bold = "", st.bodySize, false
 		}
+		return &nb
 	}
+	prev, next := neighbour(i-1), neighbour(i+1)
 	// Unnumbered headings are scored against their neighbours; the weights are empirical.
 	score := neighborCombined(ln, prev, next) + st.sizeBoost(ln.fontSize)*0.5
 	if ln.bold {
