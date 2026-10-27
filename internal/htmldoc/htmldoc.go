@@ -61,7 +61,8 @@ func ToMarkdownWith(data []byte, sink ImageSink) (string, error) {
 	if md == "" {
 		return "", ErrNoContent
 	}
-	return md, nil
+	// One trailing newline, as every other reader ends.
+	return md + "\n", nil
 }
 
 // firstHeading returns the first heading's text; only the first counts as the document's name.

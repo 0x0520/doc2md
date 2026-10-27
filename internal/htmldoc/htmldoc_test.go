@@ -11,7 +11,10 @@ func md(t *testing.T, in string) string {
 	if err != nil {
 		t.Fatalf("ToMarkdown: %v", err)
 	}
-	return got
+	if !strings.HasSuffix(got, "\n") || strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("output must end with exactly one newline: %q", got)
+	}
+	return strings.TrimSuffix(got, "\n")
 }
 
 func TestToMarkdown_Structure(t *testing.T) {
