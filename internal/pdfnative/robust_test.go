@@ -2,6 +2,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,10 +15,9 @@ func TestRenderReadsPermissionOnlyEncryptedPDF(t *testing.T) {
 	plain := buildPDF(t, synthPage{runs: []textRun{
 		{text: "Minutes of the meeting", x: 72, yTop: 120, size: 10},
 	}})
-	disableConfigDir.Do(api.DisableConfigDir)
-	conf := model.NewAESConfiguration("", "ownerpass", 128)
+	conf := encryptConfig("", "ownerpass", true, 128)
 	var enc bytes.Buffer
-	if err := api.Encrypt(bytes.NewReader(plain), &enc, conf); err != nil {
+	if err := api.Encrypt(context.Background(), bytes.NewReader(plain), &enc, conf); err != nil {
 		t.Fatalf("encrypt fixture: %v", err)
 	}
 
@@ -81,4 +81,11 @@ func rawPDF(contents ...string) []byte {
 	}
 	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xref)
 	return b.Bytes()
+}
+
+func encryptConfig(userPW, ownerPW string, aes bool, keyLength int) *model.Configuration {
+	c := model.NewStatelessConfiguration()
+	c.UserPW, c.OwnerPW = userPW, ownerPW
+	c.EncryptUsingAES, c.EncryptKeyLength = aes, keyLength
+	return c
 }

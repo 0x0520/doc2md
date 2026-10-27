@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 func TestExtractRasterImagesWithoutWritableConfigDir(t *testing.T) {
@@ -18,10 +16,6 @@ func TestExtractRasterImagesWithoutWritableConfigDir(t *testing.T) {
 	t.Setenv("HOME", blocker)
 
 	got := extractRasterImages([]byte("%PDF-1.7\nnot really a pdf"))
-
-	if model.ConfigPath != "disable" {
-		t.Errorf("pdfcpu model.ConfigPath = %q, want %q", model.ConfigPath, "disable")
-	}
 	if len(got) != 0 {
 		t.Errorf("pages with images from malformed input = %d, want 0", len(got))
 	}
