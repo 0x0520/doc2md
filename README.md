@@ -14,7 +14,7 @@ where headings, tables and reading order matter more than visual fidelity.
 
 | Format | Package | What is kept |
 |---|---|---|
-| `.pdf` | `internal/pdfnative` | reading order across columns, headings from size and weight, tables (including wrapped and cross-page cells), raster figures as `[Image: N]` markers; cover page, table of contents and running headers/footers are dropped |
+| `.pdf` | `internal/pdfnative` | reading order across columns, headings from size, weight and numbering (slide titles of exported decks included), bullet and numbered lists, tables (including wrapped and cross-page cells), text in form XObjects, raster figures as `[Image: N]` markers; cover page, table of contents and running headers/footers are dropped; password-protected files return `ErrEncrypted` |
 | `.docx` `.docm` | `internal/ooxml` | title and headings from styles (language-independent), font size as a fallback for documents without heading styles, bullet and numbered lists (also through list styles), bold/italic/strikethrough, tables, links, field results such as caption numbers, pictures; the table of contents is dropped |
 | `.pptx` `.pptm` | `internal/ooxml` | slides in presentation order, titles as headings, body placeholders as nested bullet lists, text boxes, tables, pictures |
 | `.xlsx` `.xlsm` | `internal/sheets` | one heading and table per sheet with formatted cell values, pictures after their sheet |
@@ -58,8 +58,11 @@ byte signature (AsciiDoc, CSV) need `-name` when piped.
 import "github.com/0x0520/doc2md"
 
 md, images, err := doc2md.Convert("report.docx", data)
-if errors.Is(err, doc2md.ErrUnsupportedFormat) {
+switch {
+case errors.Is(err, doc2md.ErrUnsupportedFormat):
 	// route to a fallback
+case errors.Is(err, doc2md.ErrEncrypted):
+	// the PDF needs a password
 }
 for _, img := range images {
 	// img.Seq matches the "[Image: N]" marker; img.Page, img.Ext, img.Bytes
@@ -138,7 +141,12 @@ What does not carry over:
 ```sh
 go test ./...
 go test ./internal/pdfnative/ -update-golden
+go test -run '^$' -fuzz FuzzConvert -fuzztime 5m .
+go test -run '^$' -bench Render ./internal/pdfnative/
 ```
+
+`FuzzConvert` feeds arbitrary bytes to every reader and fails on a panic or on
+any input that takes longer than two seconds.
 
 PDF tests come in two layers. Line-level tests build the internal line model
 directly. End-to-end golden tests describe a page layout in Go, render it to a
