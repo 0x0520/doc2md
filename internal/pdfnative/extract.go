@@ -2,12 +2,12 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 type PageBreak struct {
@@ -55,17 +55,14 @@ func rewritePDF(data []byte) (out []byte, err error) {
 			err = fmt.Errorf("rewrite pdf: %v", r)
 		}
 	}()
-	disableConfigDir.Do(api.DisableConfigDir)
-	conf := model.NewDefaultConfiguration()
-	conf.ValidationMode = model.ValidationRelaxed
+	conf := pdfcpuConfig()
 	var dec bytes.Buffer
-	if err := api.Decrypt(bytes.NewReader(data), &dec, conf); err == nil {
+	if err := api.Decrypt(context.Background(), bytes.NewReader(data), &dec, conf); err == nil {
 		return dec.Bytes(), nil
 	}
-	conf = model.NewDefaultConfiguration()
-	conf.ValidationMode = model.ValidationRelaxed
+	conf = pdfcpuConfig()
 	var buf bytes.Buffer
-	if err := api.Optimize(bytes.NewReader(data), &buf, conf); err != nil {
+	if err := api.Optimize(context.Background(), bytes.NewReader(data), &buf, conf, nil); err != nil {
 		return nil, fmt.Errorf("rewrite pdf: %w", err)
 	}
 	return buf.Bytes(), nil

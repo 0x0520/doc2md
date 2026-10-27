@@ -2,6 +2,7 @@ package pdfnative
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	_ "image/png"
 	"io"
 	"sort"
-	"sync"
 
 	"github.com/0x0520/doc2md/internal/docimg"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -25,11 +25,8 @@ type rawImage struct {
 	w, h  int
 }
 
-var disableConfigDir sync.Once
-
 func pdfcpuConfig() *model.Configuration {
-	disableConfigDir.Do(api.DisableConfigDir)
-	conf := model.NewDefaultConfiguration()
+	conf := model.NewStatelessConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed
 	return conf
 }
@@ -38,7 +35,7 @@ func extractRasterImages(data []byte) (out map[int]map[string]rawImage) {
 	out = map[int]map[string]rawImage{}
 	defer func() { _ = recover() }()
 	conf := pdfcpuConfig()
-	_ = api.ExtractImages(bytes.NewReader(data), nil, func(img model.Image, _ bool, _ int) error {
+	_ = api.ExtractImages(context.Background(), bytes.NewReader(data), nil, func(img model.Image, _ bool, _ int) error {
 		b, err := io.ReadAll(img)
 		if err != nil || len(b) == 0 {
 			return nil
