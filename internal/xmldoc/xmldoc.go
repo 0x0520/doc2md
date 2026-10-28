@@ -11,7 +11,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // maxNodes and maxDepth bound the tree built from untrusted input (depth drives

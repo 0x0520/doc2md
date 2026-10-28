@@ -1,4 +1,4 @@
-module github.com/0x0520/doc2md
+module github.com/nullwerke/doc2md
 
 go 1.26.0
 
@@ -9,7 +9,7 @@ require (
 	github.com/pdfcpu/pdfcpu v0.16.3
 	github.com/richardlehane/mscfb v1.0.8
 	github.com/xuri/excelize/v2 v2.11.1-0.20261026001844-a33694a7c10d
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/text v0.43.0
 )
 

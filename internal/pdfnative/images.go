@@ -12,7 +12,7 @@ import (
 	"io"
 	"sort"
 
-	"github.com/0x0520/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/docimg"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )

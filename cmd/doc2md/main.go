@@ -28,7 +28,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 
-	"github.com/0x0520/doc2md"
+	"github.com/nullwerke/doc2md"
 )
 
 func main() {

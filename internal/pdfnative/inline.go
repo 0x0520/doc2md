@@ -6,7 +6,7 @@ import (
 
 	"github.com/ledongthuc/pdf"
 
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // linkArea is a /Link annotation with a URI action: its rectangle in page space and the target.

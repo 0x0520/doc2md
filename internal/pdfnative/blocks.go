@@ -6,7 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // listItemRe matches a bullet or numbered list item with text after the marker. A

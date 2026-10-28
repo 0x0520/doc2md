@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/text/encoding/charmap"
 
-	"github.com/0x0520/doc2md/internal/docimg"
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // ErrNotRTF is returned when the input is not RTF or contains no text.

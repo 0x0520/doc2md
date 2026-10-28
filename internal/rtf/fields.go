@@ -3,7 +3,7 @@ package rtf
 import (
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // hyperlinkTarget returns the address of a HYPERLINK field instruction, or "" for
