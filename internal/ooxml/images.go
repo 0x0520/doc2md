@@ -6,8 +6,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/docimg"
-	"github.com/0x0520/doc2md/internal/zipx"
+	"github.com/nullwerke/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/zipx"
 )
 
 // media extracts images from a package's media/ parts on demand and numbers them

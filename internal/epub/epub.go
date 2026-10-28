@@ -12,9 +12,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/docimg"
-	"github.com/0x0520/doc2md/internal/htmldoc"
-	"github.com/0x0520/doc2md/internal/zipx"
+	"github.com/nullwerke/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/htmldoc"
+	"github.com/nullwerke/doc2md/internal/zipx"
 )
 
 // ErrNotEpub is returned when the input is not a readable EPUB: bad zip, no

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/0x0520/doc2md/internal/docimg"
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 	"github.com/xuri/excelize/v2"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/unicode"

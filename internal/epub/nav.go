@@ -10,8 +10,8 @@ import (
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 
-	"github.com/0x0520/doc2md/internal/htmldoc"
-	"github.com/0x0520/doc2md/internal/zipx"
+	"github.com/nullwerke/doc2md/internal/htmldoc"
+	"github.com/nullwerke/doc2md/internal/zipx"
 )
 
 // maxNavDepth is the deepest nesting honoured; Markdown has six heading levels.

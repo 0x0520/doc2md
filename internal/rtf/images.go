@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/docimg"
 )
 
 // blipFormats maps picture control words to extensions. Only PNG and JPEG are

@@ -18,17 +18,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/asciidoc"
-	"github.com/0x0520/doc2md/internal/docimg"
-	"github.com/0x0520/doc2md/internal/epub"
-	"github.com/0x0520/doc2md/internal/htmldoc"
-	"github.com/0x0520/doc2md/internal/odf"
-	"github.com/0x0520/doc2md/internal/ooxml"
-	"github.com/0x0520/doc2md/internal/pdfnative"
-	"github.com/0x0520/doc2md/internal/rtf"
-	"github.com/0x0520/doc2md/internal/sheets"
-	"github.com/0x0520/doc2md/internal/xmldoc"
-	"github.com/0x0520/doc2md/internal/zipx"
+	"github.com/nullwerke/doc2md/internal/asciidoc"
+	"github.com/nullwerke/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/epub"
+	"github.com/nullwerke/doc2md/internal/htmldoc"
+	"github.com/nullwerke/doc2md/internal/odf"
+	"github.com/nullwerke/doc2md/internal/ooxml"
+	"github.com/nullwerke/doc2md/internal/pdfnative"
+	"github.com/nullwerke/doc2md/internal/rtf"
+	"github.com/nullwerke/doc2md/internal/sheets"
+	"github.com/nullwerke/doc2md/internal/xmldoc"
+	"github.com/nullwerke/doc2md/internal/zipx"
 )
 
 // Image is one figure extracted from a document. Seq is 1-based and matches the

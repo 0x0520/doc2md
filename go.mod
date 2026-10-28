@@ -1,4 +1,4 @@
-module github.com/0x0520/doc2md
+module github.com/nullwerke/doc2md
 
 go 1.26.0
 

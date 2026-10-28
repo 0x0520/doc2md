@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/docimg"
 )
 
 // ImageSink maps an <img> src to the marker standing for the picture in the

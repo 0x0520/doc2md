@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/docimg"
-	"github.com/0x0520/doc2md/internal/mdrender"
-	"github.com/0x0520/doc2md/internal/zipx"
+	"github.com/nullwerke/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/zipx"
 )
 
 // ErrNotODF is returned when the input is not a zip with a content.xml.

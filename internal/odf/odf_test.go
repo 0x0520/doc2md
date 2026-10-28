@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0x0520/doc2md/internal/docimg"
+	"github.com/nullwerke/doc2md/internal/docimg"
 )
 
 type entry struct{ name, body string }

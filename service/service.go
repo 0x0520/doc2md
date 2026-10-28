@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/0x0520/doc2md"
-	"github.com/0x0520/doc2md/service/ui"
+	"github.com/nullwerke/doc2md"
+	"github.com/nullwerke/doc2md/service/ui"
 )
 
 // DefaultMaxBytes is the largest document accepted when Options.MaxBytes is unset.

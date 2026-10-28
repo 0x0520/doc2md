@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/net/html"
 
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // Word's HTML export has no <ul>/<ol>: list items are paragraphs whose marker

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/0x0520/doc2md/service"
+	"github.com/nullwerke/doc2md/service"
 )
 
 // serveCommand implements "doc2md serve": it parses the serve flags and runs the

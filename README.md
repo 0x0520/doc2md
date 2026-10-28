@@ -1,7 +1,7 @@
 # doc2md
 
-[![CI](https://github.com/0x0520/doc2md/actions/workflows/ci.yml/badge.svg)](https://github.com/0x0520/doc2md/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/0x0520/doc2md.svg)](https://pkg.go.dev/github.com/0x0520/doc2md)
+[![CI](https://github.com/nullwerke/doc2md/actions/workflows/ci.yml/badge.svg)](https://github.com/nullwerke/doc2md/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nullwerke/doc2md.svg)](https://pkg.go.dev/github.com/nullwerke/doc2md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Pure-Go conversion of documents to clean, structured Markdown. No external
@@ -60,7 +60,7 @@ Across formats the output follows one set of conventions:
 ## Install
 
 ```sh
-go install github.com/0x0520/doc2md/cmd/doc2md@latest
+go install github.com/nullwerke/doc2md/cmd/doc2md@latest
 ```
 
 ## Command line
@@ -80,7 +80,7 @@ byte signature (AsciiDoc, CSV) need `-name` when piped.
 ## Library
 
 ```go
-import "github.com/0x0520/doc2md"
+import "github.com/nullwerke/doc2md"
 
 md, images, err := doc2md.Convert("report.docx", data)
 switch {

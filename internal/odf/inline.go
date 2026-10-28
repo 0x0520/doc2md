@@ -3,7 +3,7 @@ package odf
 import (
 	"strings"
 
-	"github.com/0x0520/doc2md/internal/mdrender"
+	"github.com/nullwerke/doc2md/internal/mdrender"
 )
 
 // linkTarget returns href if it is a link worth rendering: not empty, not an
